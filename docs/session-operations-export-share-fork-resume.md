@@ -25,7 +25,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/drop`                                 | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one | None                                                                                |
 | `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
 | `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | None                                                                                |
-| `/supercompact [here]`                  | Interactive slash command    | Yes (history rewritten by content kind)       | Forks and switches by default; `here` rewrites the current session file                     | One session artifact holding every removed original                                 |
+| `/supercompact [here] [keep N]`         | Interactive slash command    | Yes (tool calls and reasoning deleted)        | Copies and switches by default; `here` rewrites the current session file                    | Archive artifact for `here` only; a copied run leaves the original as the record     |
 | `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
 | `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file                                                       | None                                                                                |
 | `--resume <id\|path>`                   | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory | None                                                                                |
@@ -271,104 +271,93 @@ Interactive `/supercompact` reduces a session to the conversation inside it.
 Every reduction under [compaction.md](./compaction.md) cuts on **time**: pick a
 boundary, summarize or discard what is older, keep the recent tail verbatim.
 Supercompact cuts on **content kind** instead. It walks the whole branch with no
-recency window, no size gate, no threshold, and no summarization model, and
-removes the three kinds a model regenerates anyway:
+recency window, no size gate, no threshold and no summarization model, and
+deletes every tool call together with its result, plus every reasoning block.
+User and assistant messages survive verbatim from the first turn.
 
-- every tool result, replaced with a placeholder carrying an `artifact://` link;
-- every tool-call argument value above the budget, replaced with a character count;
-- every assistant reasoning block.
+### Pairs, not halves
 
-Everything the user and the assistant actually said is kept verbatim from the
-first turn. Dialogue is the only part of a transcript that cannot be rebuilt from
-the filesystem, and across real sessions it is a few percent of the context.
+A tool call and its result are removed together, matched by call id. A provider
+rejects an assistant tool call with no matching result, and a result with no
+matching call, so neither half can go on its own. That is also why nothing is
+left in their place: with the pair gone there is no slot needing a placeholder.
+
+Result entries are emptied rather than spliced out of the branch. The branch is a
+parent-linked chain, so dropping a node would orphan everything after it, and an
+entry whose message has no content is skipped by the provider serializers.
 
 ### What survives
 
-Tool-call blocks keep their id, name, and argument keys, so call/result pairing
-and provider replay shape are unchanged. Only oversized values inside the
-arguments are elided, which keeps the surviving trace readable: `read` still
-shows its path, `edit` still shows its target and line numbers.
-
-`skill` results are never removed. They are instructions the agent is still
+`skill` calls are never removed. They are instructions the agent is still
 following, not tool output.
 
 Computer-use calls and results are never removed either, because they replay from
 `providerMetadata.actions` and `providerMetadata.screenshot` rather than from
-message content: rewriting the content would shrink nothing the provider reads
-while breaking the call pairing. Image blocks inside a tool result are kept for
-the same class of reason; `/shake images` and `dropImages` own removing those.
+message content: deleting the content would shrink nothing the provider reads
+while breaking the pairing.
 
-`anthropicServerTool` blocks are out of scope. They are stored verbatim
-specifically so same-provider replay can re-send them unchanged, so rewriting one
-is exactly what would break replay.
+`anthropicServerTool` blocks are out of scope. They are stored verbatim so
+same-provider replay can re-send them unchanged.
 
-### Recovery
+### Where the removed data goes
 
-Every removed original is concatenated into one session artifact before anything
-is mutated, including the fields that are cleared rather than replaced:
-`rawBlock`, `thoughtSignature` and `providerPayload` for a trimmed call, and the
-whole reasoning block for a dropped one. A tool-result placeholder names the
-artifact and the region, so `read artifact://<id>` brings it back.
+`/supercompact` calls `AgentSession.fork()` first, so the original session file
+keeps every byte and is itself the complete record of what was removed. Nothing
+else is needed, and nothing else is written.
 
-The artifact is a precondition. A failed write aborts the operation instead of
-degrading to a bare placeholder, and a session with no artifact directory is
-refused outright: `saveArtifact` keeps an in-memory copy there, but nothing reads
-that map and `artifact://` resolves filesystem directories only, so the recovery
-link would be a dead end.
+A requested copy that does not happen aborts the operation. `fork()` also returns
+false when an extension cancelled `session_before_switch`, and answering "do not
+switch sessions" by rewriting the current one is the opposite of what was asked.
 
-### Fork semantics
+`/supercompact here` rewrites the current session, which is the only way to reduce
+a session that cannot be copied. That run has no original to fall back on, so it
+writes every removed call, result and reasoning block to one session artifact
+first and refuses to proceed if that write fails.
 
-`/supercompact` calls `AgentSession.fork()` first, so the source transcript keeps
-every byte and the reduced history becomes the active session. A requested fork
-that does not happen aborts the operation. `fork()` also returns false when an
-extension cancelled `session_before_switch`, and answering "do not switch
-sessions" by rewriting the current one is the opposite of what was asked.
-
-`/supercompact here` rewrites the current session deliberately, which is the only
-way to reduce a session that cannot fork.
-
-Either path is rejected while a response is streaming, because it rewrites
-the history the live turn is reading from.
+Either path is rejected while a response is streaming, because it rewrites the
+history the live turn is reading from.
 
 ### Keeping recent rounds
 
-`compaction.supercompactKeepRecentTurns` (default `0`) leaves the last N rounds
-of conversation completely untouched. The count is rounds, not tokens: the walk
-stops at the start of the Nth-from-last `user` (or `bashExecution`) message, so a
-kept window can never sever a tool result from the call that produced it, the way
-a token budget can. When the branch holds fewer than N rounds nothing is removed,
-because every round is inside the window.
+`/supercompact keep 3` leaves the last three rounds whole.
+`compaction.supercompactKeepRecentTurns` (default `0`) sets the default.
+
+The count is rounds, not tokens: the walk stops at the start of the Nth-from-last
+`user` or `bashExecution` message, so a kept window can never separate a tool
+result from the call that produced it. Only a real turn counts. Compaction's
+`findTurnStartIndex` also treats `custom_message` and `branch_summary` as turn
+starts, which is right for cutting a summary boundary but wrong here: an injected
+reminder would become the boundary and the round the setting promised to keep
+would be reduced anyway.
 
 ### As an automatic compaction method
 
-`supercompact` is a selectable entry in `compaction.methodOrder`, though it is not
-in the default order. Automatic maintenance runs it through the same inline path
-as `shake` (`SessionMaintenance.#runInlineReduction`), so it inherits the
-dead-loop guard from issues #2119/#2275, the provider-anchored recovery band, and
-the continuation scheduling. Like shake it advances to the next configured method
-when it cannot reclaim enough context to clear the recovery band.
+`supercompact` is selectable in `compaction.methodOrder`, though not in the
+default order. Automatic maintenance runs it through the same inline path as
+shake (`SessionMaintenance.#runInlineReduction`), so it inherits the dead-loop
+guard from issues #2119/#2275, the provider-anchored recovery band, and the
+continuation scheduling. Shake's own failure semantics are unchanged.
 
-Unlike the manual command, the automatic path never forks: it reduces the active
-session in place, because a compaction method is not allowed to change session
-identity mid-turn.
+The automatic path never copies the session, because a compaction method must not
+change session identity mid-turn. It therefore always writes the archive.
 
 ### Provider replay
 
-Supercompacted messages drop `providerPayload`. A native-history copy of an assistant
-turn would otherwise serve the original arguments back on replay and undo the
-operation, the same reason `provider-image-budget.ts` clears it when it clamps
-image content. Provider sessions that cache message identity are closed through
+Messages that lost blocks drop `providerPayload`. A native-history copy of an
+assistant turn would otherwise replay the original blocks and undo the operation,
+the same reason `provider-image-budget.ts` clears it when it clamps image
+content. Provider sessions that cache message identity are closed through
 `closeCodexProviderSessionsForHistoryRewrite()`, and the displayed context budget
-is corrected via `recordAnchoredHistoryRewrite()` so it does not stay pinned to
-pre-supercompact counts.
+is corrected via `recordAnchoredHistoryRewrite()`, measured by counting the
+entries inside the billed prompt before and after rather than estimating.
 
 ### Implementation
 
-- [`../packages/agent/src/compaction/supercompact.ts`](../packages/agent/src/compaction/supercompact.ts) — pure region detection and in-place mutation.
-- `SessionMaintenance.supercompactContext()` — artifact offload, persistence, context replay.
+- [`../packages/agent/src/compaction/supercompact.ts`](../packages/agent/src/compaction/supercompact.ts) — pure region detection and in-place deletion.
+- `SessionMaintenance.supercompactContext()` — archive, persistence, context replay.
 - `SessionMaintenance.#runInlineReduction()` — shared automatic path for `shake` and `supercompact`.
-- `AgentSession.supercompact()` — fork, then reduce.
-- [`../packages/coding-agent/src/session/supercompact-types.ts`](../packages/coding-agent/src/session/supercompact-types.ts) — result shape and operator summary.
+- `AgentSession.supercompact()` — copy, then reduce.
+- [`../packages/coding-agent/src/session/supercompact-types.ts`](../packages/coding-agent/src/session/supercompact-types.ts) — options, result shape and operator summary.
 
 ## Resume and continue
 

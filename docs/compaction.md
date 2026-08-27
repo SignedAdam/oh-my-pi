@@ -143,11 +143,11 @@ Threshold, incomplete-output, and overflow recovery advance to the next configur
 
 Including `supercompact` in `compaction.methodOrder` runs the same inline, no-LLM machinery as shake through `SessionMaintenance.#runInlineReduction`, so it inherits the dead-loop guard, the provider-anchored recovery band, and the continuation scheduling. It is not in the default order.
 
-Where shake cuts by size inside a protected recent window, supercompact cuts by content kind across the whole branch: every tool result, every oversized tool-call argument value, and every reasoning block, leaving user and assistant messages verbatim. Removed originals are written to one session artifact first, and the pass refuses to run when that write fails, so the operation is never a bare delete. `compaction.supercompactKeepRecentTurns` exempts the last N rounds.
+Where shake cuts by size inside a protected recent window, supercompact cuts by content kind across the whole branch: every tool call together with its result, and every reasoning block, leaving user and assistant messages verbatim. Calls and results are matched by call id and only ever removed as a pair, since a provider rejects either half alone. `compaction.supercompactKeepRecentTurns` exempts the last N rounds.
 
-Two content kinds are deliberately exempt. `skill` results are live instructions rather than tool output. Computer-use calls and results replay from `providerMetadata` (`actions` and `screenshot`) rather than from message content, so rewriting their content would shrink nothing the provider reads while breaking the pairing. Image blocks inside a tool result are also kept; `/shake images` and `dropImages` own that job.
+`skill` calls are exempt as live instructions. Computer-use calls and results are exempt because they replay from `providerMetadata` rather than message content, so deleting the content would shrink nothing the provider reads while breaking the pairing. `anthropicServerTool` blocks are out of scope for the same class of reason.
 
-Automatic supercompact emits the normal auto-compaction events with `action: "supercompact"`. Unlike the manual `/supercompact`, the automatic path never forks, because a compaction method must not change session identity mid-turn. See [session-operations-export-share-fork-resume.md](./session-operations-export-share-fork-resume.md) for the manual command.
+The automatic path never copies the session, because a compaction method must not change session identity mid-turn, so it always writes every removed original to a session artifact first and refuses to proceed if that write fails. The manual `/supercompact` copies the session instead and needs no archive, since the untouched original is the record. See [session-operations-export-share-fork-resume.md](./session-operations-export-share-fork-resume.md).
 
 ### Snapcompact method
 

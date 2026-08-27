@@ -4,7 +4,13 @@
 
 ### Added
 
-- Added `collectSupercompactRegions` and `applySupercompactRegions` in `compaction/supercompact`, which locate and remove tool results, oversized tool-call arguments, and reasoning blocks across a whole branch while leaving user and assistant messages verbatim. Image blocks inside a tool result are kept. `skill` results are exempt because they are live instructions rather than tool output, and computer-use calls and results are exempt because they replay from provider metadata rather than from message content.
+- Added `collectSupercompactRegions` and `applySupercompactRegions` in `compaction/supercompact`, which delete tool calls together with their results, and reasoning blocks, across a whole branch while leaving user and assistant messages verbatim. Calls and results are matched by call id and only ever removed as a pair, because a provider rejects either half on its own. `skill` calls and computer-use calls are exempt, the first because they are live instructions and the second because they replay from provider metadata rather than message content.
+
+## [18.0.7] - 2026-08-26
+
+### Fixed
+
+- Fixed Codex remote compaction to preserve images returned by image-reading tools, preventing them from being replayed as incorrect synthetic user messages.
 
 ## [18.0.5] - 2026-08-25
 
