@@ -116,11 +116,19 @@ function keepWindowStart(entries: SessionEntry[], keepTurns: number): number {
  * The one exemption is `keepRecentTurns`, which stops the walk at the start of
  * the Nth-from-last turn so recent rounds stay whole.
  */
+/**
+ * Identity of one tool call for off-branch protection: the entry that holds it
+ * plus its id. The id alone is not enough, because a later call can reuse it.
+ */
+export function sharedCallKey(entryId: string, callId: string): string {
+	return `${entryId}\u0000${callId}`;
+}
+
 export function collectSupercompactRegions(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	keepRecentTurns: number,
-	callIdsAnsweredOffBranch: ReadonlySet<string> = new Set(),
+	callsAnsweredOffBranch: ReadonlySet<string> = new Set(),
 ): SupercompactRegion[] {
 	const regions: SupercompactRegion[] = [];
 	const stopIndex = keepRecentTurns > 0 ? keepWindowStart(entries, keepRecentTurns) : entries.length;
@@ -194,7 +202,9 @@ export function collectSupercompactRegions(
 						// `ask` re-answer flow adds a sibling result. The call entry is
 						// shared by every branch, so deleting the block here would strip
 						// it from the other branch too and leave that result unmatched.
-						callIdsAnsweredOffBranch.has(call.id),
+						// Keyed by entry and id together, because a later ordinary call
+						// may reuse the id and has no sibling result of its own.
+						callsAnsweredOffBranch.has(sharedCallKey(entry.id, call.id)),
 				});
 				continue;
 			}

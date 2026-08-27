@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction/entries";
-import { applySupercompactRegions, collectSupercompactRegions } from "@oh-my-pi/pi-agent-core/compaction/supercompact";
+import {
+	applySupercompactRegions,
+	collectSupercompactRegions,
+	sharedCallKey,
+} from "@oh-my-pi/pi-agent-core/compaction/supercompact";
 import type { AssistantMessage, TextContent, ToolResultMessage, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 
 const tokenizer = new Tokenizer();
@@ -320,12 +324,30 @@ describe("supercompact", () => {
 			toolOutcome("c1", "ask", "first answer"),
 		];
 
-		const regions = collectSupercompactRegions(entries, tokenizer, 0, new Set(["c1"]));
+		const regions = collectSupercompactRegions(entries, tokenizer, 0, new Set([sharedCallKey("a1", "c1")]));
 		const tally = applySupercompactRegions(regions);
 
 		// The call entry is shared by every branch below it, so deleting the block
 		// would strip it from the sibling branch and leave that result unmatched.
 		expect(tally.toolPairs).toBe(0);
 		expect((entries[0].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(true);
+	});
+
+	it("protects only the call entry that is actually shared, not a later reuse", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "dup", name: "ask", arguments: { question: "which?" } }]),
+			toolOutcomeWithId("r1", "dup", "ask", "first answer"),
+			assistantTurn("a2", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "x.ts" } }]),
+			toolOutcomeWithId("r2", "dup", "read", "file body"),
+		];
+
+		// Only the first call entry has a sibling result on another branch.
+		const regions = collectSupercompactRegions(entries, tokenizer, 0, new Set([sharedCallKey("a1", "dup")]));
+		const tally = applySupercompactRegions(regions);
+
+		expect(tally.toolPairs).toBe(1);
+		expect(tally.removedResultEntryIds).toEqual(["r2"]);
+		expect((entries[0].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(true);
+		expect((entries[2].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(false);
 	});
 });

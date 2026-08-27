@@ -52,6 +52,7 @@ import {
 	applySupercompactRegions,
 	collectSupercompactRegions,
 	type SupercompactRegion,
+	sharedCallKey,
 } from "@oh-my-pi/pi-agent-core/compaction/supercompact";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
@@ -732,7 +733,7 @@ export class SessionMaintenance {
 	 * this shape: one call, a sibling result per answer. Those pairs are left
 	 * alone rather than half-removed.
 	 */
-	#callIdsAnsweredOffBranch(branchEntries: SessionEntry[]): ReadonlySet<string> {
+	#callsAnsweredOffBranch(branchEntries: SessionEntry[]): ReadonlySet<string> {
 		const all = this.#host.sessionManager.getEntries();
 		if (all.length === branchEntries.length) return new Set();
 		const onBranch = new Map(branchEntries.map(entry => [entry.id, entry]));
@@ -754,7 +755,7 @@ export class SessionMaintenance {
 					ancestor.message.role === "assistant" &&
 					ancestor.message.content.some(block => block.type === "toolCall" && block.id === message.toolCallId)
 				) {
-					if (onBranch.has(ancestor.id)) shared.add(message.toolCallId);
+					if (onBranch.has(ancestor.id)) shared.add(sharedCallKey(ancestor.id, message.toolCallId));
 					break;
 				}
 				ancestorId = ancestor.parentId;
@@ -777,7 +778,7 @@ export class SessionMaintenance {
 			branchEntries,
 			this.#tokenizer,
 			keepRecentTurns,
-			this.#callIdsAnsweredOffBranch(branchEntries),
+			this.#callsAnsweredOffBranch(branchEntries),
 		);
 		const unchanged: SupercompactOutcome = {
 			toolPairsRemoved: 0,
@@ -865,12 +866,23 @@ export class SessionMaintenance {
 		}
 		this.#host.recordAnchoredHistoryRewrite(Math.max(0, anchoredBefore - anchoredAfter));
 
-		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("supercompact");
-		this.#host.syncTodoPhasesFromBranch();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		// The mutation is already done and cannot be undone: the blocks were spliced
+		// out of shared message objects and the result entries are off the branch.
+		// So the live context is rebuilt whether or not the write lands, and a write
+		// failure surfaces only after the runtime matches what the manager holds.
+		// Leaving it unrebuilt would keep the agent talking to messages that no
+		// longer exist. Nothing is lost either way: the archive holds the originals
+		// and the file on disk is still the pre-pass session.
+		let sessionContext: ReturnType<SessionMaintenanceHost["buildDisplaySessionContext"]>;
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+		} finally {
+			sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.resetAdvisorRuntimes("supercompact");
+			this.#host.syncTodoPhasesFromBranch();
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		}
 
 		return {
 			toolPairsRemoved: tally.toolPairs,

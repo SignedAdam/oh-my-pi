@@ -370,6 +370,21 @@ describe("automatic supercompact at the session layer", () => {
 		expect(outcome.toolPairsRemoved).toBe(1);
 	});
 
+	it("still rebuilds the live context when the session write fails", async () => {
+		const manager = persistedManager();
+		seed(manager);
+		maintenance = build(manager);
+		const failure = new Error("atomic replace denied");
+		manager.rewriteEntries = () => Promise.reject(failure);
+
+		await expect(maintenance.supercompactContext({ archive: true })).rejects.toThrow(/atomic replace denied/);
+
+		// The mutation cannot be undone, so the runtime must match the manager
+		// rather than keep talking to messages that are no longer on the branch.
+		const stillHasResults = agent.state.messages.some(message => message.role === "toolResult");
+		expect(stillHasResults).toBe(false);
+	});
+
 	it("keeps the recent rounds whole when configured to", async () => {
 		const manager = persistedManager();
 		seed(manager);
