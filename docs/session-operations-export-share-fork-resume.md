@@ -316,6 +316,18 @@ archive, so the bytes are reachable either way.
 `skill` calls are never removed. They are instructions the agent is still
 following, not tool output.
 
+`task` calls are never removed either. Their result carries the subagent's usage
+in `details.usage`, which the session folds into its cumulative token, cost and
+premium-request totals, so removing the entry would drop figures the account was
+already billed for. This one has a price: a `task` call holds the whole subagent
+prompt in its arguments, so keeping the pair costs roughly four points of the
+total reduction on a task-heavy session.
+
+A call that is also answered on another branch is left alone. The call entry is
+shared by every branch below it, so deleting the block would strip it from the
+sibling branch and leave that branch's result with nothing to pair to. The `ask`
+re-answer flow creates exactly this shape.
+
 Computer-use calls and results are never removed either, because they replay from
 `providerMetadata.actions` and `providerMetadata.screenshot` rather than from
 message content: deleting the content would shrink nothing the provider reads

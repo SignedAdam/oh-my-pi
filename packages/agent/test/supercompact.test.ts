@@ -299,4 +299,33 @@ describe("supercompact", () => {
 		expect((entries[0].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(true);
 		expect((entries[1].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(false);
 	});
+
+	it("never removes task results, which carry the subagent's billed usage", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "task", arguments: { prompt: "go" } }]),
+			toolOutcome("c1", "task", "subagent output"),
+		];
+
+		const { tally } = supercompact(entries);
+
+		expect(tally.toolPairs).toBe(0);
+		expect(tally.removedResultEntryIds).toEqual([]);
+		const assistant = entries[0].message as AssistantMessage;
+		expect(assistant.content.some(block => block.type === "toolCall")).toBe(true);
+	});
+
+	it("leaves a call alone when the same call is answered on another branch", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "ask", arguments: { question: "which?" } }]),
+			toolOutcome("c1", "ask", "first answer"),
+		];
+
+		const regions = collectSupercompactRegions(entries, tokenizer, 0, new Set(["c1"]));
+		const tally = applySupercompactRegions(regions);
+
+		// The call entry is shared by every branch below it, so deleting the block
+		// would strip it from the sibling branch and leave that result unmatched.
+		expect(tally.toolPairs).toBe(0);
+		expect((entries[0].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(true);
+	});
 });

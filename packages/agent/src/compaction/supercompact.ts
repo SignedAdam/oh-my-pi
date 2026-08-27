@@ -25,11 +25,24 @@ import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 
 /**
- * `skill` results are instructions the agent is still following, not tool
- * output, so they are never removed. Nothing else is exempt: the point of the
- * operation is that size and recency do not earn an exemption.
+ * Exempt tools, each for a reason that is not about size or recency - the point
+ * of the operation is that neither of those earns an exemption.
+ *
+ * `skill` results are instructions the agent is still following, not tool output.
+ *
+ * `task` results carry the subagent's usage in `details.usage`, which the session
+ * folds into its cumulative token, cost, orchestration and premium-request
+ * totals. Removing the entry would quietly reduce figures the account was already
+ * billed for, so `/usage` and the status line would fall after a reduction.
+ *
+ * This one is not free. The results themselves are small - 0.3% of tool-result
+ * bytes across a 60-session sample - but a `task` call carries the whole subagent
+ * prompt in its arguments, and those stay too. On a task-heavy session that is
+ * around four points of the total reduction. Correct accounting is worth more
+ * than the four points; folding removed usage into retained totals would buy them
+ * back and is the better fix when someone wants them.
  */
-const PROTECTED_TOOLS = ["skill"];
+const PROTECTED_TOOLS = ["skill", "task"];
 
 /** One tool call and its result, removed together. */
 export interface ToolPairRegion {
@@ -107,6 +120,7 @@ export function collectSupercompactRegions(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	keepRecentTurns: number,
+	callIdsAnsweredOffBranch: ReadonlySet<string> = new Set(),
 ): SupercompactRegion[] {
 	const regions: SupercompactRegion[] = [];
 	const stopIndex = keepRecentTurns > 0 ? keepWindowStart(entries, keepRecentTurns) : entries.length;
@@ -171,9 +185,16 @@ export function collectSupercompactRegions(
 					entry: entry as SessionMessageEntry,
 					blockIndex,
 					call,
-					// Computer-use calls replay from `providerMetadata.actions`, and
-					// `skill` results are live instructions rather than tool output.
-					exempt: PROTECTED_TOOLS.includes(call.name) || call.providerMetadata?.type === "computer",
+					exempt:
+						PROTECTED_TOOLS.includes(call.name) ||
+						// Computer-use calls replay from `providerMetadata.actions`, so
+						// the stored content is not what the provider reads.
+						call.providerMetadata?.type === "computer" ||
+						// The same call can be answered on more than one branch: the
+						// `ask` re-answer flow adds a sibling result. The call entry is
+						// shared by every branch, so deleting the block here would strip
+						// it from the other branch too and leave that result unmatched.
+						callIdsAnsweredOffBranch.has(call.id),
 				});
 				continue;
 			}

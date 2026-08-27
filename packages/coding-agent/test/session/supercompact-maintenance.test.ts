@@ -329,6 +329,29 @@ describe("automatic supercompact at the session layer", () => {
 		expect(end?.artifactId).toBeDefined();
 	});
 
+	it("leaves a pair whose call is also answered on another branch", async () => {
+		const manager = persistedManager();
+		manager.appendMessage(userMessage("which one?"));
+		const callEntryId = manager.appendMessage(assistantWithCall("shared", model));
+		manager.appendMessage(toolResult("shared"));
+		// The `ask` re-answer flow: a second result for the same call, on a sibling
+		// branch below the shared call entry.
+		manager.appendMessageToBranch(toolResult("shared"), callEntryId);
+		maintenance = build(manager);
+
+		const outcome = await maintenance.supercompactContext({ archive: true });
+
+		expect(outcome.toolPairsRemoved).toBe(0);
+		const branch = manager.getBranch();
+		const stillCalls = branch.some(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some(block => block.type === "toolCall"),
+		);
+		expect(stillCalls).toBe(true);
+	});
+
 	it("keeps the recent rounds whole when configured to", async () => {
 		const manager = persistedManager();
 		seed(manager);

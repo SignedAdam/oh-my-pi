@@ -723,6 +723,29 @@ export class SessionMaintenance {
 	 * `rewriteEntries`, replay the rebuilt context, and tear down provider
 	 * sessions that cache message identity.
 	 */
+	/**
+	 * Call ids that also have a result on some other branch.
+	 *
+	 * A tool call entry is shared by every branch that descends from it, so
+	 * deleting its block strips it from all of them - while this pass only sees
+	 * the results on the active path. The `ask` re-answer flow creates exactly
+	 * this shape: one call, a sibling result per answer. Those pairs are left
+	 * alone rather than half-removed.
+	 */
+	#callIdsAnsweredOffBranch(branchEntries: SessionEntry[]): ReadonlySet<string> {
+		const all = this.#host.sessionManager.getEntries();
+		if (all.length === branchEntries.length) return new Set();
+		const onBranch = new Set(branchEntries.map(entry => entry.id));
+		const shared = new Set<string>();
+		for (const entry of all) {
+			if (entry.type !== "message" || onBranch.has(entry.id)) continue;
+			const message = entry.message;
+			if (message.role !== "toolResult") continue;
+			shared.add(message.toolCallId);
+		}
+		return shared;
+	}
+
 	async supercompactContext(
 		opts: { keepRecentTurns?: number; archive?: boolean; signal?: AbortSignal } = {},
 	): Promise<SupercompactOutcome> {
@@ -733,7 +756,12 @@ export class SessionMaintenance {
 		const keepRecentTurns = Math.max(0, Math.floor(opts.keepRecentTurns ?? configured));
 		const tokensBefore = this.#measureLiveContextTokens();
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const regions = collectSupercompactRegions(branchEntries, this.#tokenizer, keepRecentTurns);
+		const regions = collectSupercompactRegions(
+			branchEntries,
+			this.#tokenizer,
+			keepRecentTurns,
+			this.#callIdsAnsweredOffBranch(branchEntries),
+		);
 		const unchanged: SupercompactOutcome = {
 			toolPairsRemoved: 0,
 			reasoningBlocksRemoved: 0,
@@ -4094,7 +4122,14 @@ export class SessionMaintenance {
 					stillOverThreshold = shouldCompact(postShakeTokens, contextWindow, compactionSettings);
 				}
 			}
-			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
+			// Idle is exempt for shake because its timer re-checks usage before firing
+			// again, so a no-op cannot dead-loop. Supercompact is not exempt: the end
+			// event consumes the idle timer and only `agent_end` arms a new one, so
+			// returning NONE here leaves the context oversized with no later method
+			// ever reached.
+			const idleMayAdvance = kind === "supercompact";
+			const shouldFallBack =
+				(reason !== "idle" || idleMayAdvance) && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
 				const errorMessage = reclaimed
 					? `${label} reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
