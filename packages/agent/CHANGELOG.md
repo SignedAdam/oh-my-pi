@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `collectSupercompactRegions` and `applySupercompactRegions` in `compaction/supercompact`, which delete tool calls together with their results, and reasoning blocks, across a whole branch while leaving user and assistant messages verbatim. Calls and results are matched by call id and only ever removed as a pair, because a provider rejects either half on its own. `skill` calls and computer-use calls are exempt, the first because they are live instructions and the second because they replay from provider metadata rather than message content. A call id reused across turns is paired with its own result rather than the last one, so an earlier result is never stranded without its call.
+- Added `collectSupercompactRegions` and `applySupercompactRegions` in `compaction/supercompact`, which delete tool calls together with their results, and reasoning blocks, across a whole branch while leaving user and assistant messages verbatim. Calls and results are matched by call id and only ever removed as a pair, because a provider rejects either half on its own. `skill` calls and computer-use calls are exempt, the first because they are live instructions and the second because they replay from provider metadata rather than message content. Pairing is positional: a call owns the first result for its id that arrives before the next call reusing that id, so a reused id never hands one call another call's result. A call whose result never arrived is left in place.
 
 ## [18.0.7] - 2026-08-26
 

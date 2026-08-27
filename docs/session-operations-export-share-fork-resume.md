@@ -277,10 +277,22 @@ User and assistant messages survive verbatim from the first turn.
 
 ### Pairs, not halves
 
-A tool call and its result are removed together, matched by call id. A provider
-rejects an assistant tool call with no matching result, and a result with no
-matching call, so neither half can go on its own. That is also why nothing is
-left in their place: with the pair gone there is no slot needing a placeholder.
+A tool call and its result are removed together. A provider rejects an assistant
+tool call with no matching result, and a result with no matching call, so neither
+half can go on its own. That is also why nothing is left in their place: with the
+pair gone there is no slot needing a placeholder.
+
+Pairing is positional, not a lookup by id. Ids are reused across turns, so a call
+owns the first result for its id that arrives before the next call reusing it. One
+ordered pass does this: a call is held pending under its id, a result closes the
+pending call, and a call still pending when its id is reused never answered and is
+dropped. A lookup by id, or a queue drained without regard to position, hands one
+call another call's result - and then deletes a call whose result is still live,
+which is the rejection the pairing exists to avoid.
+
+A call whose result never arrived is left alone. The pair is the unit, there is
+nothing to take with it, and `buildSessionContext` already strips a dangling call
+before it reaches a provider.
 
 A call is one block inside an assistant message, so removing it leaves that
 message in place. A result is a whole entry, so removing it means removing the
