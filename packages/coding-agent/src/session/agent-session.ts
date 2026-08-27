@@ -4963,11 +4963,19 @@ export class AgentSession {
 	 * to reduce a session that cannot fork.
 	 *
 	 * Rejected while streaming: it rewrites the history the live turn is
-	 * reading from.
+	 * reading from. Rejected while another compaction is in flight for a subtler
+	 * reason: ACP `/compact` runs in the background, so `isStreaming` can be
+	 * false while a pass is mid-flight, and that pass commits using preparation
+	 * and a `firstKeptEntryId` captured from the branch as it was. Rewriting
+	 * underneath it would land a summary describing history that no longer exists,
+	 * against a boundary entry that may be gone.
 	 */
 	async supercompact(opts: SupercompactOptions = {}): Promise<SupercompactResult> {
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish or abort it before supercompacting.");
+		}
+		if (this.isCompacting || this.isGeneratingHandoff) {
+			throw new Error("Wait for the compaction in progress to finish or abort it before supercompacting.");
 		}
 		// Copy first, so the original session keeps every byte and becomes the
 		// archive. A requested copy that does not happen aborts: `fork()` also

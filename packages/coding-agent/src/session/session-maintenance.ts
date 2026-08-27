@@ -4108,6 +4108,11 @@ export class SessionMaintenance {
 						willRetry: false,
 						skipped: !reclaimed,
 						errorMessage,
+						// The archive was written and history was rewritten before this
+						// branch decided the context is still too full. Dropping the id
+						// here would leave a listener with only an error and no way to
+						// reach what was already removed.
+						artifactId: result.artifactId,
 					},
 					detachPostCommit,
 				);

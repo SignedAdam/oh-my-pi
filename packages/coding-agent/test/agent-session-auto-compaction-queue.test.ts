@@ -909,6 +909,61 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(orphanInBranch).toBe(false);
 	});
 
+	it("refuses to supercompact while a compaction is already in flight", async () => {
+		// ACP `/compact` runs in the background, so `isStreaming` stays false while a
+		// pass is mid-flight. That pass commits with preparation and a
+		// `firstKeptEntryId` captured from the branch as it was, so a rewrite
+		// underneath it would land a summary describing history that no longer
+		// exists, against a boundary entry that may be gone.
+		let observedCompacting: boolean | undefined;
+		let rejection: string | undefined;
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		const attempts: Promise<unknown>[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start") {
+				observedCompacting = session.isCompacting;
+				attempts.push(
+					session.supercompact({ inPlace: true }).catch((error: unknown) => {
+						rejection = error instanceof Error ? error.message : String(error);
+					}),
+				);
+			} else if (event.type === "auto_compaction_end") {
+				onCompactionDone();
+			}
+		});
+
+		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			session.agent.clearAllQueues();
+		});
+
+		const assistantMsg = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Done." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 190000,
+				output: 1000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await Promise.all(attempts);
+
+		expect(observedCompacting).toBe(true);
+		expect(rejection).toMatch(/compaction in progress/);
+	});
+
 	it("has isCompacting true when the auto_compaction_start event fires", async () => {
 		// Defect 1: the compaction AbortController (which backs isCompacting) must be
 		// installed before auto_compaction_start is emitted. If it is installed after,
