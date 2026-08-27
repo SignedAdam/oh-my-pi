@@ -2527,6 +2527,37 @@ export class SessionManager {
 		await this.rewriteEntries();
 	}
 
+	/**
+	 * Remove entries from the branch outright, reparenting whatever hung off them.
+	 *
+	 * `discardEntryDurably` handles one entry and records a branch marker naming
+	 * it, which is right for abandoning a turn and wrong for a history reduction
+	 * that drops a thousand of them. This takes the whole set at once: every
+	 * surviving entry whose parent was removed is reattached to the nearest
+	 * ancestor that stayed, so the chain the loader walks stays connected, and
+	 * the leaf moves back to a survivor when it was itself removed. Callers own
+	 * durability by calling `rewriteEntries()` when they are done mutating.
+	 */
+	removeMessageEntries(ids: ReadonlySet<string>): number {
+		if (ids.size === 0) return 0;
+		const parents = new Map<string, string | null>();
+		for (const entry of this.#entries) parents.set(entry.id, entry.parentId);
+		const survivingAncestor = (id: string | null): string | null => {
+			let cursor = id;
+			while (cursor !== null && ids.has(cursor)) cursor = parents.get(cursor) ?? null;
+			return cursor;
+		};
+		const kept = this.#entries.filter(entry => !ids.has(entry.id));
+		if (kept.length === this.#entries.length) return 0;
+		for (const entry of kept) entry.parentId = survivingAncestor(entry.parentId);
+		const removed = this.#entries.length - kept.length;
+		this.#entries = kept;
+		this.#index.rebuild(this.#entries);
+		const leaf = this.#index.leafId();
+		if (leaf !== null && ids.has(leaf)) this.#index.setLeaf(survivingAncestor(leaf));
+		return removed;
+	}
+
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromExtension?: boolean): string {
 		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);

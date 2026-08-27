@@ -727,7 +727,10 @@ export class SessionMaintenance {
 		opts: { keepRecentTurns?: number; archive?: boolean; signal?: AbortSignal } = {},
 	): Promise<SupercompactOutcome> {
 		const configured = this.#host.settings.getGroup("compaction").supercompactKeepRecentTurns;
-		const keepRecentTurns = Math.max(0, opts.keepRecentTurns ?? configured);
+		// Floored, not just clamped: the keep window counts turns by incrementing
+		// and comparing for equality, so a fractional setting like 1.5 is never
+		// reached and would silently keep nothing.
+		const keepRecentTurns = Math.max(0, Math.floor(opts.keepRecentTurns ?? configured));
 		const tokensBefore = this.#measureLiveContextTokens();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const regions = collectSupercompactRegions(branchEntries, this.#tokenizer, keepRecentTurns);
@@ -742,7 +745,17 @@ export class SessionMaintenance {
 		let artifactId: string | undefined;
 		if (opts.archive === true) {
 			// An in-place run rewrites the only copy, so the archive is a
-			// precondition rather than a courtesy.
+			// precondition rather than a courtesy. Gate on the artifact store and
+			// not on the session file: a subagent can adopt a parent's store while
+			// having no session file of its own, and it is allowed to run.
+			// `saveArtifact` otherwise falls back to an in-memory map that no read
+			// path consults, which would report success and hand back a pointer
+			// that can never resolve.
+			if (this.#host.sessionManager.getArtifactsDir() == null) {
+				throw new Error(
+					"Rewriting this session in place needs somewhere to store what it removes, and this session has no artifact directory.",
+				);
+			}
 			artifactId = await this.#saveSupercompactArtifact(regions);
 			if (artifactId === undefined) {
 				throw new Error(
@@ -791,6 +804,10 @@ export class SessionMaintenance {
 		for (const entry of anchoredEntries) anchoredBefore += this.#tokenizer.countMessage(entry.message);
 
 		const tally = applySupercompactRegions(regions);
+		// Results leave the branch entirely. Removing them here, before the token
+		// recount below, is what makes the reported saving match what the next
+		// prompt actually carries.
+		this.#host.sessionManager.removeMessageEntries(new Set(tally.removedResultEntryIds));
 
 		let anchoredAfter = 0;
 		for (const entry of anchoredEntries) anchoredAfter += this.#tokenizer.countMessage(entry.message);
@@ -4018,7 +4035,11 @@ export class SessionMaintenance {
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
 			const result = await this.#runReducer(kind, signal);
-			if (signal.aborted) {
+			// Only a reducer that changed nothing can be reported as cancelled. Once
+			// it has rewritten and persisted the branch, a signal that fires during
+			// that await is too late: calling it aborted would leave the TUI showing
+			// a stale transcript for history that is already committed.
+			if (signal.aborted && result.dropped === 0) {
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
@@ -4093,6 +4114,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry,
 					skipped: !reclaimed,
+					artifactId: result.artifactId,
 				},
 				detachPostCommit,
 			);
@@ -4164,8 +4186,14 @@ export class SessionMaintenance {
 			// throws on a missing or unwritable recovery artifact, which will not fix
 			// itself, so re-selecting it every turn would stall maintenance; it
 			// advances for every reason but idle, whose timer rechecks usage anyway.
+			// Shake keeps its original semantics: only overflow advances, because only
+			// overflow has to be resolved before the next request. Supercompact
+			// advances for every reason including idle: it throws when the archive
+			// cannot be written, that does not fix itself, and the idle timer is
+			// cancelled by the end event without rearming, so returning NONE would
+			// leave the oversized context untouched with no later method retried.
 			if (kind === "shake") return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
-			return reason === "idle" ? COMPACTION_CHECK_NONE : "fallback";
+			return "fallback";
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
@@ -4184,7 +4212,7 @@ export class SessionMaintenance {
 	async #runReducer(
 		kind: "shake" | "supercompact",
 		signal: AbortSignal,
-	): Promise<{ dropped: number; tokensFreed: number }> {
+	): Promise<{ dropped: number; tokensFreed: number; artifactId?: string }> {
 		if (kind === "shake") {
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			return { dropped: result.toolResultsDropped + result.blocksDropped, tokensFreed: result.tokensFreed };
@@ -4193,6 +4221,7 @@ export class SessionMaintenance {
 		return {
 			dropped: result.toolPairsRemoved + result.reasoningBlocksRemoved,
 			tokensFreed: Math.max(0, result.tokensBefore - result.tokensAfter),
+			artifactId: result.artifactId,
 		};
 	}
 

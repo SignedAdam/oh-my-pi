@@ -64,6 +64,8 @@ export interface SupercompactTally {
 	reasoningBlocks: number;
 	/** Tokens held by every region before the pass. */
 	tokensBefore: number;
+	/** Tool-result entries the caller must remove from the branch. */
+	removedResultEntryIds: string[];
 }
 
 /**
@@ -110,15 +112,25 @@ export function collectSupercompactRegions(
 	const stopIndex = keepRecentTurns > 0 ? keepWindowStart(entries, keepRecentTurns) : entries.length;
 
 	// Results are found by call id so a pair can be removed together even when
-	// other entries sit between them.
-	const resultByCallId = new Map<string, SessionMessageEntry>();
+	// other entries sit between them. A queue per id, not one entry: separate
+	// turns can reuse a call id, and a plain map would point both calls at the
+	// last result. The first call would then keep a live id whose result was
+	// removed under it, which a provider rejects as an unmatched pair.
+	const resultsByCallId = new Map<string, SessionMessageEntry[]>();
 	for (let index = 0; index < stopIndex; index++) {
 		const entry = entries[index];
 		if (entry.type !== "message") continue;
 		const message = entry.message as AgentMessage;
 		if (message.role !== "toolResult") continue;
-		resultByCallId.set((message as ToolResultMessage).toolCallId, entry as SessionMessageEntry);
+		const callId = (message as ToolResultMessage).toolCallId;
+		const queued = resultsByCallId.get(callId);
+		if (queued) queued.push(entry as SessionMessageEntry);
+		else resultsByCallId.set(callId, [entry as SessionMessageEntry]);
 	}
+	const peekResult = (callId: string): SessionMessageEntry | undefined => resultsByCallId.get(callId)?.[0];
+	const consumeResult = (callId: string): void => {
+		resultsByCallId.get(callId)?.shift();
+	};
 
 	for (let index = 0; index < stopIndex; index++) {
 		const entry = entries[index];
@@ -136,9 +148,12 @@ export function collectSupercompactRegions(
 				// Computer-use calls replay from `providerMetadata.actions`, so the
 				// stored content is not what the provider reads.
 				if (call.providerMetadata?.type === "computer") continue;
-				const resultEntry = resultByCallId.get(call.id);
+				// Peek, then consume only once the pair is committed: an exempt pair
+				// must leave its result in the queue for the next call with that id.
+				const resultEntry = peekResult(call.id);
 				const result = resultEntry?.message as ToolResultMessage | undefined;
 				if (result?.providerMetadata?.type === "computer") continue;
+				consumeResult(call.id);
 				regions.push({
 					kind: "toolPair",
 					callEntry: entry as SessionMessageEntry,
@@ -179,7 +194,7 @@ export function collectSupercompactRegions(
  * message has no content is skipped by the provider serializers.
  */
 export function applySupercompactRegions(regions: SupercompactRegion[]): SupercompactTally {
-	const tally: SupercompactTally = { toolPairs: 0, reasoningBlocks: 0, tokensBefore: 0 };
+	const tally: SupercompactTally = { toolPairs: 0, reasoningBlocks: 0, tokensBefore: 0, removedResultEntryIds: [] };
 	const blocksToDrop = new Map<SessionMessageEntry, Set<number>>();
 	const resultsToEmpty = new Set<SessionMessageEntry>();
 
@@ -210,12 +225,12 @@ export function applySupercompactRegions(regions: SupercompactRegion[]): Superco
 		invalidateMessageCache(message as AgentMessage);
 	}
 
-	for (const entry of resultsToEmpty) {
-		const message = entry.message as ToolResultMessage;
-		message.content = [];
-		message.prunedAt = Date.now();
-		invalidateMessageCache(message as AgentMessage);
-	}
+	// The result is a whole entry, so it can only leave by being removed from the
+	// branch. Emptying it instead would leave a `tool_result` with no `tool_use`,
+	// which Anthropic rejects, and stamping `prunedAt` would render it as
+	// `[Output truncated]` - a placeholder standing in for content that is not
+	// truncated but gone. The caller removes these ids and persists.
+	tally.removedResultEntryIds = [...resultsToEmpty].map(entry => entry.id);
 
 	return tally;
 }

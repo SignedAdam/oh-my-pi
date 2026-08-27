@@ -7,6 +7,7 @@
 - Added the `/supercompact` slash command, which reduces a session to its conversation. It deletes every tool call together with its result, and every reasoning block, across the whole history, while user and assistant messages stay verbatim. It copies the session first, so the original keeps every byte and is itself the record of what was removed. `/supercompact here` rewrites the current session instead and writes an archive, since that run has no copy to fall back on. `/supercompact keep 3` leaves the last three rounds whole.
 - Added `supercompact` as a selectable `compaction.methodOrder` method, so automatic maintenance can reduce history instead of summarizing it. Not in the default order.
 - Added `compaction.supercompactKeepRecentTurns` to set the default number of recent rounds left untouched.
+- Added `SessionManager.removeMessageEntries()`, which removes a set of entries from the branch and reattaches every surviving child to the nearest ancestor that stayed.
 
 ## [18.0.7] - 2026-08-26
 
@@ -97,11 +98,6 @@
 - Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
 - Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
 - Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
-### Added
-
-- Added the `/supercompact` slash command, which reduces a session to its conversation: tool results, tool-call arguments, and reasoning blocks are removed across the whole history while user and assistant messages stay verbatim. Removed originals stay readable through `artifact://`, and the operation refuses to run when that artifact cannot be written. It forks first so the source transcript is untouched; `/supercompact here` rewrites the current session.
-- Added `supercompact` as a selectable `compaction.methodOrder` method, so automatic maintenance can reduce history instead of summarizing it. Not in the default order.
-- Added `compaction.supercompactKeepRecentTurns` to leave the last N rounds of conversation untouched.
 
 ## [18.0.5] - 2026-08-25
 

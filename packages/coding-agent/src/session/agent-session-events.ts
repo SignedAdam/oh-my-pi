@@ -29,6 +29,8 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 			/** True when compaction was skipped for a benign reason. */
 			skipped?: boolean;
+			/** Archive holding what an inline reducer removed, when it wrote one. */
+			artifactId?: string;
 	  }
 	| {
 			type: "auto_retry_start";

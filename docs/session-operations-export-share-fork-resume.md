@@ -282,9 +282,22 @@ rejects an assistant tool call with no matching result, and a result with no
 matching call, so neither half can go on its own. That is also why nothing is
 left in their place: with the pair gone there is no slot needing a placeholder.
 
-Result entries are emptied rather than spliced out of the branch. The branch is a
-parent-linked chain, so dropping a node would orphan everything after it, and an
-entry whose message has no content is skipped by the provider serializers.
+A call is one block inside an assistant message, so removing it leaves that
+message in place. A result is a whole entry, so removing it means removing the
+entry: `SessionManager.removeMessageEntries()` takes the whole set at once and
+reattaches every surviving child to the nearest ancestor that stayed, keeping the
+parent-linked chain the loader walks intact.
+
+Emptying the entry instead was tried and is wrong twice over. An empty result
+still serializes as a `tool_result` with no `tool_use`, which Anthropic rejects,
+and marking it `prunedAt` renders it as `[Output truncated]` - a placeholder
+standing in for content that is not truncated but gone.
+
+An image inside a tool result goes with the pair. The image bytes are not in the
+session: persisted images are `blob:sha256:` references into the global
+content-addressed blob store, which this pass never touches. A fork keeps the
+reference in the untouched original, and an in-place run writes the image into the
+archive, so the bytes are reachable either way.
 
 ### What survives
 

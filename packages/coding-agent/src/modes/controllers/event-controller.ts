@@ -1938,7 +1938,11 @@ export class EventController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
-				this.ctx.showStatus(`${inlineLabel} completed`);
+				this.ctx.showStatus(
+					event.artifactId
+						? `${inlineLabel} completed. Removed content: artifact://${event.artifactId}`
+						: `${inlineLabel} completed`,
+				);
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;

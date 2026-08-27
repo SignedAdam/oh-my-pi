@@ -38,6 +38,11 @@ function assistantTurn(id: string, content: AssistantMessage["content"]): Sessio
 	});
 }
 
+function toolOutcomeWithId(entryId: string, toolCallId: string, toolName: string, text: string): SessionMessageEntry {
+	const entry = toolOutcome(toolCallId, toolName, text);
+	return { ...entry, id: entryId };
+}
+
 function toolOutcome(toolCallId: string, toolName: string, text: string): SessionMessageEntry {
 	const content: TextContent[] = [{ type: "text", text }];
 	return messageEntry(`result-${toolCallId}`, {
@@ -85,9 +90,9 @@ describe("supercompact", () => {
 		expect(assistant.content).toHaveLength(1);
 		expect((assistant.content[0] as TextContent).text).toBe(answer);
 
-		// The call is gone, not hollowed out, and its result is emptied with it.
+		// The call is gone, not hollowed out, and its result entry is named for removal.
 		expect(assistant.content.some(block => block.type === "toolCall")).toBe(false);
-		expect((entries[2].message as ToolResultMessage).content).toHaveLength(0);
+		expect(tally.removedResultEntryIds).toEqual([entries[2].id]);
 	});
 
 	it("never leaves a call without its result or a result without its call", () => {
@@ -100,12 +105,11 @@ describe("supercompact", () => {
 			toolOutcome("c2", "read", "contents of b"),
 		];
 
-		supercompact(entries);
+		const { tally } = supercompact(entries);
 
 		const calls = (entries[0].message as AssistantMessage).content.filter(block => block.type === "toolCall");
 		expect(calls).toHaveLength(0);
-		expect((entries[1].message as ToolResultMessage).content).toHaveLength(0);
-		expect((entries[2].message as ToolResultMessage).content).toHaveLength(0);
+		expect(tally.removedResultEntryIds).toEqual([entries[1].id, entries[2].id]);
 	});
 
 	it("archives the call and its result together so an in-place run can recover them", () => {
@@ -201,5 +205,42 @@ describe("supercompact", () => {
 		const entries = [userTurn("u1", "what is the plan?"), assistantTurn("a1", [{ type: "text", text: "Ship it." }])];
 
 		expect(collectSupercompactRegions(entries, tokenizer, 0)).toHaveLength(0);
+	});
+
+	it("pairs a reused tool-call id with its own result, never stranding the earlier one", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "first.ts" } }]),
+			toolOutcomeWithId("r1", "dup", "read", "first body"),
+			assistantTurn("a2", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "second.ts" } }]),
+			toolOutcomeWithId("r2", "dup", "read", "second body"),
+		];
+
+		const regions = collectSupercompactRegions(entries, tokenizer, 0);
+		const tally = applySupercompactRegions(regions);
+
+		// Both results leave. A map keyed by id would name "r2" twice and leave
+		// "r1" behind as a result with no call, which a provider rejects.
+		expect(tally.toolPairs).toBe(2);
+		expect([...tally.removedResultEntryIds].sort()).toEqual(["r1", "r2"]);
+		for (const index of [0, 2]) {
+			const assistant = entries[index].message as AssistantMessage;
+			expect(assistant.content.some(block => block.type === "toolCall")).toBe(false);
+		}
+	});
+
+	it("archives each reused id against the arguments it was actually called with", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "first.ts" } }]),
+			toolOutcomeWithId("r1", "dup", "read", "first body"),
+			assistantTurn("a2", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "second.ts" } }]),
+			toolOutcomeWithId("r2", "dup", "read", "second body"),
+		];
+
+		const regions = collectSupercompactRegions(entries, tokenizer, 0);
+
+		expect(regions[0].originalText).toContain("first.ts");
+		expect(regions[0].originalText).toContain("first body");
+		expect(regions[1].originalText).toContain("second.ts");
+		expect(regions[1].originalText).toContain("second body");
 	});
 });
