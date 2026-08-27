@@ -2551,10 +2551,14 @@ export class SessionManager {
 		if (kept.length === this.#entries.length) return 0;
 		for (const entry of kept) entry.parentId = survivingAncestor(entry.parentId);
 		const removed = this.#entries.length - kept.length;
+		// Read the leaf before the rebuild. `rebuild` derives it from the last
+		// physical entry, which can belong to an inactive branch, so afterwards
+		// there is no way to tell the real leaf from that one - and it would never
+		// look removed, because it came out of `kept`.
+		const leafBefore = this.#index.leafId();
 		this.#entries = kept;
 		this.#index.rebuild(this.#entries);
-		const leaf = this.#index.leafId();
-		if (leaf !== null && ids.has(leaf)) this.#index.setLeaf(survivingAncestor(leaf));
+		if (leafBefore !== null) this.#index.setLeaf(survivingAncestor(leafBefore));
 		return removed;
 	}
 

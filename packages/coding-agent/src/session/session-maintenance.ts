@@ -804,13 +804,20 @@ export class SessionMaintenance {
 		for (const entry of anchoredEntries) anchoredBefore += this.#tokenizer.countMessage(entry.message);
 
 		const tally = applySupercompactRegions(regions);
+		const removedResultIds = new Set(tally.removedResultEntryIds);
 		// Results leave the branch entirely. Removing them here, before the token
 		// recount below, is what makes the reported saving match what the next
 		// prompt actually carries.
-		this.#host.sessionManager.removeMessageEntries(new Set(tally.removedResultEntryIds));
+		this.#host.sessionManager.removeMessageEntries(removedResultIds);
 
+		// A removed entry keeps its content, so recounting it would charge the same
+		// tokens on both sides and cancel out most of the reduction. It is gone from
+		// the branch, so it counts as zero.
 		let anchoredAfter = 0;
-		for (const entry of anchoredEntries) anchoredAfter += this.#tokenizer.countMessage(entry.message);
+		for (const entry of anchoredEntries) {
+			if (removedResultIds.has(entry.id)) continue;
+			anchoredAfter += this.#tokenizer.countMessage(entry.message);
+		}
 		this.#host.recordAnchoredHistoryRewrite(Math.max(0, anchoredBefore - anchoredAfter));
 
 		await this.#host.sessionManager.rewriteEntries();

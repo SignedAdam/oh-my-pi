@@ -50,7 +50,7 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 }
 
 /**
- * Parse `/supercompact [here] [keep N] [images]` in any order.
+ * Parse `/supercompact [here] [keep N]` in any order.
  *
  * Each flag overrides its setting for this run only, so a one-off pass never
  * means editing configuration first.

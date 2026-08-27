@@ -243,4 +243,25 @@ describe("supercompact", () => {
 		expect(regions[1].originalText).toContain("second.ts");
 		expect(regions[1].originalText).toContain("second body");
 	});
+
+	it("takes an exempt call's own result out of the queue", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "dup", name: "skill", arguments: { path: "s" } }]),
+			toolOutcomeWithId("r-skill", "dup", "skill", "skill instructions"),
+			assistantTurn("a2", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "x.ts" } }]),
+			toolOutcomeWithId("r-read", "dup", "read", "file body"),
+		];
+
+		const regions = collectSupercompactRegions(entries, tokenizer, 0);
+		const tally = applySupercompactRegions(regions);
+
+		// The skill pair stays whole, and the read call removes its own result -
+		// not the skill's, which an id-keyed queue that skipped exempt calls would.
+		expect(tally.toolPairs).toBe(1);
+		expect(tally.removedResultEntryIds).toEqual(["r-read"]);
+		const skillCall = entries[0].message as AssistantMessage;
+		expect(skillCall.content.some(block => block.type === "toolCall")).toBe(true);
+		const readCall = entries[2].message as AssistantMessage;
+		expect(readCall.content.some(block => block.type === "toolCall")).toBe(false);
+	});
 });

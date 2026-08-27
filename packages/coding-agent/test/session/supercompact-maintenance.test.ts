@@ -1,16 +1,18 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const CONTEXT_WINDOW = 100_000;
+const tokenizer = new Tokenizer();
 
 function userMessage(text: string): UserMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
@@ -73,7 +75,7 @@ describe("automatic supercompact at the session layer", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
-	let temp: TempDir;
+	let temps: TempDir[];
 	let sessionManager: SessionManager;
 	let maintenance: SessionMaintenance;
 	let agent: Agent;
@@ -149,17 +151,33 @@ describe("automatic supercompact at the session layer", () => {
 		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
 	});
 
-	afterAll(async () => {
+	afterAll(() => {
 		authStorage.close();
-		if (temp) await temp.remove();
 	});
 
 	beforeEach(() => {
-		temp = TempDir.createSync("omp-supercompact-maintenance");
+		temps = [];
 	});
 
+	afterEach(async () => {
+		await Promise.all(temps.map(dir => dir.remove()));
+	});
+
+	// `@` puts it under the system temp dir; without it TempDir treats the prefix
+	// as a relative path and leaves the directory in the worktree.
+	function tempRoot(): string {
+		const dir = TempDir.createSync("@omp-supercompact-maintenance");
+		temps.push(dir);
+		return dir.path();
+	}
+
+	function persistedManager(): SessionManager {
+		const root = tempRoot();
+		return SessionManager.create(path.join(root, "project"), path.join(root, "sessions"));
+	}
+
 	it("refuses to run when the session has nowhere to write the archive", async () => {
-		const manager = SessionManager.inMemory(path.join(temp.path(), "project"));
+		const manager = SessionManager.inMemory(path.join(tempRoot(), "project"));
 		seed(manager);
 		maintenance = build(manager);
 		const before = manager.getBranch().length;
@@ -173,7 +191,7 @@ describe("automatic supercompact at the session layer", () => {
 	});
 
 	it("archives before it mutates, and reports the archive id", async () => {
-		const manager = SessionManager.create(path.join(temp.path(), "project"), path.join(temp.path(), "sessions"));
+		const manager = persistedManager();
 		seed(manager);
 		maintenance = build(manager);
 
@@ -191,7 +209,7 @@ describe("automatic supercompact at the session layer", () => {
 	});
 
 	it("leaves the session byte-for-byte unchanged when cancelled before the mutation", async () => {
-		const manager = SessionManager.create(path.join(temp.path(), "project"), path.join(temp.path(), "sessions"));
+		const manager = persistedManager();
 		seed(manager);
 		maintenance = build(manager);
 		const sessionFile = manager.getSessionFile();
@@ -211,7 +229,7 @@ describe("automatic supercompact at the session layer", () => {
 	});
 
 	it("bills the anchored rewrite for what it actually removed", async () => {
-		const manager = SessionManager.create(path.join(temp.path(), "project"), path.join(temp.path(), "sessions"));
+		const manager = persistedManager();
 		seed(manager);
 		maintenance = build(manager);
 
@@ -223,7 +241,7 @@ describe("automatic supercompact at the session layer", () => {
 	});
 
 	it("removes the result entries from the branch instead of hollowing them out", async () => {
-		const manager = SessionManager.create(path.join(temp.path(), "project"), path.join(temp.path(), "sessions"));
+		const manager = persistedManager();
 		seed(manager);
 		maintenance = build(manager);
 		const before = manager.getBranch().length;
@@ -243,7 +261,7 @@ describe("automatic supercompact at the session layer", () => {
 	});
 
 	it("leaves no tool call without a result, which providers reject", async () => {
-		const manager = SessionManager.create(path.join(temp.path(), "project"), path.join(temp.path(), "sessions"));
+		const manager = persistedManager();
 		seed(manager);
 		maintenance = build(manager);
 
@@ -261,8 +279,41 @@ describe("automatic supercompact at the session layer", () => {
 		expect(messages.some(message => message.role === "toolResult")).toBe(false);
 	});
 
+	it("bills the result tokens too, not just the call blocks", async () => {
+		const manager = persistedManager();
+		seed(manager);
+		maintenance = build(manager);
+		// Each seeded result is "file body " x400, so an accounting pass that only
+		// saw the call blocks would report a tiny fraction of this.
+		const resultTokens = manager
+			.getBranch()
+			.filter(entry => entry.type === "message" && entry.message.role === "toolResult")
+			.reduce((total, entry) => total + tokenizer.countMessage((entry as SessionMessageEntry).message), 0);
+
+		await maintenance.supercompactContext({ archive: true });
+
+		expect(anchoredRewrites.length).toBe(1);
+		expect(anchoredRewrites[0]).toBeGreaterThan(resultTokens);
+	});
+
+	it("keeps the active leaf on the conversation after removing entries", async () => {
+		const manager = persistedManager();
+		seed(manager);
+		// A later physical entry on an inactive branch: a naive index rebuild adopts
+		// this as the leaf and silently switches the conversation onto it.
+		const conversationLeaf = manager.getBranch().at(-1)?.id;
+		if (conversationLeaf === undefined) throw new Error("Expected a seeded branch");
+		manager.appendMessageToBranch(userMessage("abandoned branch"), manager.getBranch()[0].id);
+		expect(manager.getBranch().at(-1)?.id).toBe(conversationLeaf);
+		maintenance = build(manager);
+
+		await maintenance.supercompactContext({ archive: true });
+
+		expect(manager.getBranch().at(-1)?.id).toBe(conversationLeaf);
+	});
+
 	it("keeps the recent rounds whole when configured to", async () => {
-		const manager = SessionManager.create(path.join(temp.path(), "project"), path.join(temp.path(), "sessions"));
+		const manager = persistedManager();
 		seed(manager);
 		maintenance = build(manager);
 

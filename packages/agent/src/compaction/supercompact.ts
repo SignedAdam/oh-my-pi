@@ -127,10 +127,7 @@ export function collectSupercompactRegions(
 		if (queued) queued.push(entry as SessionMessageEntry);
 		else resultsByCallId.set(callId, [entry as SessionMessageEntry]);
 	}
-	const peekResult = (callId: string): SessionMessageEntry | undefined => resultsByCallId.get(callId)?.[0];
-	const consumeResult = (callId: string): void => {
-		resultsByCallId.get(callId)?.shift();
-	};
+	const takeResult = (callId: string): SessionMessageEntry | undefined => resultsByCallId.get(callId)?.shift();
 
 	for (let index = 0; index < stopIndex; index++) {
 		const entry = entries[index];
@@ -144,16 +141,17 @@ export function collectSupercompactRegions(
 
 			if (block.type === "toolCall") {
 				const call = block as ToolCall;
-				if (PROTECTED_TOOLS.includes(call.name)) continue;
-				// Computer-use calls replay from `providerMetadata.actions`, so the
-				// stored content is not what the provider reads.
-				if (call.providerMetadata?.type === "computer") continue;
-				// Peek, then consume only once the pair is committed: an exempt pair
-				// must leave its result in the queue for the next call with that id.
-				const resultEntry = peekResult(call.id);
+				// Take the result before any exemption test. The queue is in document
+				// order, so a call that leaves its result behind hands it to the next
+				// call with the same id: that call would archive and delete an exempt
+				// result, while its own result stayed behind with no call to pair to.
+				const resultEntry = takeResult(call.id);
 				const result = resultEntry?.message as ToolResultMessage | undefined;
+				if (PROTECTED_TOOLS.includes(call.name)) continue;
+				// Computer-use calls and results replay from `providerMetadata`, so
+				// the stored content is not what the provider reads.
+				if (call.providerMetadata?.type === "computer") continue;
 				if (result?.providerMetadata?.type === "computer") continue;
-				consumeResult(call.id);
 				regions.push({
 					kind: "toolPair",
 					callEntry: entry as SessionMessageEntry,
