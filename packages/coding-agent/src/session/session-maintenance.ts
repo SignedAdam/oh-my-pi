@@ -873,7 +873,7 @@ export class SessionMaintenance {
 		// Leaving it unrebuilt would keep the agent talking to messages that no
 		// longer exist. Nothing is lost either way: the archive holds the originals
 		// and the file on disk is still the pre-pass session.
-		let sessionContext: ReturnType<SessionMaintenanceHost["buildDisplaySessionContext"]>;
+		let sessionContext: SessionContext;
 		try {
 			await this.#host.sessionManager.rewriteEntries();
 		} finally {
