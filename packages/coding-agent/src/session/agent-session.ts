@@ -3798,6 +3798,7 @@ export class AgentSession {
 				willRetry: event.willRetry,
 				errorMessage: event.errorMessage,
 				skipped: event.skipped,
+				artifactId: event.artifactId,
 			});
 		} else if (event.type === "auto_retry_start") {
 			await this.#extensionRunner.emit({

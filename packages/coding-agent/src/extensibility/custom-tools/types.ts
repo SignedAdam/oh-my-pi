@@ -125,6 +125,8 @@ export type CustomToolSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
+			/** Archive holding what an inline reducer removed, when it wrote one. */
+			artifactId?: string;
 	  }
 	| {
 			reason: "auto_retry_start";

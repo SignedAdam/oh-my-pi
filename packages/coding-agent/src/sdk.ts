@@ -1057,6 +1057,7 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 					aborted: event.aborted,
 					willRetry: event.willRetry,
 					errorMessage: event.errorMessage,
+					artifactId: event.artifactId,
 				},
 				ctx,
 			),

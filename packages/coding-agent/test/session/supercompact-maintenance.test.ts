@@ -80,6 +80,7 @@ describe("automatic supercompact at the session layer", () => {
 	let maintenance: SessionMaintenance;
 	let agent: Agent;
 	let anchoredRewrites: number[];
+	let sessionEvents: { type: string; action?: string; artifactId?: string }[];
 
 	function build(manager: SessionManager): SessionMaintenance {
 		sessionManager = manager;
@@ -88,6 +89,7 @@ describe("automatic supercompact at the session layer", () => {
 		});
 		agent.replaceMessages(manager.buildSessionContext().messages as AgentMessage[]);
 		anchoredRewrites = [];
+		sessionEvents = [];
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.asyncEnabled": false,
@@ -111,7 +113,9 @@ describe("automatic supercompact at the session layer", () => {
 			messages: () => agent.state.messages,
 			baseSystemPrompt: () => ["Test"],
 			nonMessageTokenSource: () => ({}),
-			emitSessionEvent: async () => {},
+			emitSessionEvent: async (event: { type: string; action?: string; artifactId?: string }) => {
+				sessionEvents.push(event);
+			},
 			emitNotice: () => {},
 			schedulePostPromptTask: () => {},
 			scheduleAgentContinue: () => {},
@@ -126,6 +130,7 @@ describe("automatic supercompact at the session layer", () => {
 			},
 			getContextUsage: () => undefined,
 			getContextBreakdown: () => undefined,
+			findLastAssistantMessage: () => undefined,
 			abort: async () => {},
 			abortHandoff: () => {},
 		} as unknown as SessionMaintenanceHost;
@@ -310,6 +315,18 @@ describe("automatic supercompact at the session layer", () => {
 		await maintenance.supercompactContext({ archive: true });
 
 		expect(manager.getBranch().at(-1)?.id).toBe(conversationLeaf);
+	});
+
+	it("reports the archive id on the completion event so a listener can read it", async () => {
+		const manager = persistedManager();
+		seed(manager);
+		maintenance = build(manager);
+
+		await maintenance.runAutoCompaction("threshold", false);
+
+		const end = sessionEvents.find(event => event.type === "auto_compaction_end");
+		expect(end?.action).toBe("supercompact");
+		expect(end?.artifactId).toBeDefined();
 	});
 
 	it("keeps the recent rounds whole when configured to", async () => {

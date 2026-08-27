@@ -129,6 +129,7 @@ describe("supercompact", () => {
 	it("drops the native replay payload so originals cannot come back", () => {
 		const entries = [
 			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }]),
+			toolOutcome("c1", "bash", "command output here"),
 		];
 		(entries[0].message as AssistantMessage).providerPayload = {
 			type: "openaiResponsesHistory",
@@ -263,5 +264,39 @@ describe("supercompact", () => {
 		expect(skillCall.content.some(block => block.type === "toolCall")).toBe(true);
 		const readCall = entries[2].message as AssistantMessage;
 		expect(readCall.content.some(block => block.type === "toolCall")).toBe(false);
+	});
+
+	it("leaves a call whose result never arrived, because the pair is the unit", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }]),
+			userTurn("u1", "never mind"),
+		];
+
+		const { tally } = supercompact(entries);
+
+		// Nothing to pair it with, so nothing is removed and the replay payload is
+		// left alone. Dangling calls are stripped when context is built.
+		expect(tally.toolPairs).toBe(0);
+		expect(tally.removedResultEntryIds).toEqual([]);
+		const assistant = entries[0].message as AssistantMessage;
+		expect(assistant.content.some(block => block.type === "toolCall")).toBe(true);
+	});
+
+	it("gives a reused id to the call that owns it, not the one that never answered", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "dup", name: "skill", arguments: { name: "linear" } }]),
+			assistantTurn("a2", [{ type: "toolCall", id: "dup", name: "read", arguments: { path: "x.ts" } }]),
+			toolOutcomeWithId("r-read", "dup", "read", "file body"),
+		];
+
+		const { tally } = supercompact(entries);
+
+		// The skill call closed unanswered when its id was reused. A global queue
+		// would hand this result to it, then delete the read call while its own
+		// result stayed live and unmatched.
+		expect(tally.toolPairs).toBe(1);
+		expect(tally.removedResultEntryIds).toEqual(["r-read"]);
+		expect((entries[0].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(true);
+		expect((entries[1].message as AssistantMessage).content.some(b => b.type === "toolCall")).toBe(false);
 	});
 });

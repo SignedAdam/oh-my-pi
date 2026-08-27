@@ -111,28 +111,52 @@ export function collectSupercompactRegions(
 	const regions: SupercompactRegion[] = [];
 	const stopIndex = keepRecentTurns > 0 ? keepWindowStart(entries, keepRecentTurns) : entries.length;
 
-	// Results are found by call id so a pair can be removed together even when
-	// other entries sit between them. A queue per id, not one entry: separate
-	// turns can reuse a call id, and a plain map would point both calls at the
-	// last result. The first call would then keep a live id whose result was
-	// removed under it, which a provider rejects as an unmatched pair.
-	const resultsByCallId = new Map<string, SessionMessageEntry[]>();
-	for (let index = 0; index < stopIndex; index++) {
-		const entry = entries[index];
-		if (entry.type !== "message") continue;
-		const message = entry.message as AgentMessage;
-		if (message.role !== "toolResult") continue;
-		const callId = (message as ToolResultMessage).toolCallId;
-		const queued = resultsByCallId.get(callId);
-		if (queued) queued.push(entry as SessionMessageEntry);
-		else resultsByCallId.set(callId, [entry as SessionMessageEntry]);
+	// One ordered pass, because pairing is positional. Ids get reused across
+	// turns, so a call owns the first result for its id that arrives before the
+	// next call reusing it - not the first one in a global queue. A call still
+	// pending when its id is reused never produced a result and is dropped: it
+	// must not take the later call's result and leave that call to be deleted
+	// with its result still live, which a provider rejects as an unmatched pair.
+	interface PendingCall {
+		entry: SessionMessageEntry;
+		blockIndex: number;
+		call: ToolCall;
+		exempt: boolean;
 	}
-	const takeResult = (callId: string): SessionMessageEntry | undefined => resultsByCallId.get(callId)?.shift();
+	const pendingByCallId = new Map<string, PendingCall>();
+
+	const pushPair = (pending: PendingCall, resultEntry: SessionMessageEntry | undefined): void => {
+		const result = resultEntry?.message as ToolResultMessage | undefined;
+		// Computer-use results replay from `providerMetadata.screenshot`, so the
+		// stored content is not what the provider reads.
+		if (pending.exempt || result?.providerMetadata?.type === "computer") return;
+		regions.push({
+			kind: "toolPair",
+			callEntry: pending.entry,
+			blockIndex: pending.blockIndex,
+			resultEntry,
+			tokens:
+				tokenizer.countTokens(JSON.stringify(pending.call)) +
+				(result ? tokenizer.countMessage(result as AgentMessage) : 0),
+			label: pending.call.name,
+			originalText: JSON.stringify({ call: pending.call, result }, null, 1),
+		});
+	};
 
 	for (let index = 0; index < stopIndex; index++) {
 		const entry = entries[index];
 		if (entry.type !== "message") continue;
 		const message = entry.message as AgentMessage;
+
+		if (message.role === "toolResult") {
+			const callId = (message as ToolResultMessage).toolCallId;
+			const pending = pendingByCallId.get(callId);
+			if (pending === undefined) continue;
+			pendingByCallId.delete(callId);
+			pushPair(pending, entry as SessionMessageEntry);
+			continue;
+		}
+
 		if (message.role !== "assistant") continue;
 		const assistant = message as AssistantMessage;
 
@@ -141,27 +165,15 @@ export function collectSupercompactRegions(
 
 			if (block.type === "toolCall") {
 				const call = block as ToolCall;
-				// Take the result before any exemption test. The queue is in document
-				// order, so a call that leaves its result behind hands it to the next
-				// call with the same id: that call would archive and delete an exempt
-				// result, while its own result stayed behind with no call to pair to.
-				const resultEntry = takeResult(call.id);
-				const result = resultEntry?.message as ToolResultMessage | undefined;
-				if (PROTECTED_TOOLS.includes(call.name)) continue;
-				// Computer-use calls and results replay from `providerMetadata`, so
-				// the stored content is not what the provider reads.
-				if (call.providerMetadata?.type === "computer") continue;
-				if (result?.providerMetadata?.type === "computer") continue;
-				regions.push({
-					kind: "toolPair",
-					callEntry: entry as SessionMessageEntry,
+				// A call already pending under this id closes here with no result.
+				pendingByCallId.delete(call.id);
+				pendingByCallId.set(call.id, {
+					entry: entry as SessionMessageEntry,
 					blockIndex,
-					resultEntry,
-					tokens:
-						tokenizer.countTokens(JSON.stringify(call)) +
-						(result ? tokenizer.countMessage(result as AgentMessage) : 0),
-					label: call.name,
-					originalText: JSON.stringify({ call, result }, null, 1),
+					call,
+					// Computer-use calls replay from `providerMetadata.actions`, and
+					// `skill` results are live instructions rather than tool output.
+					exempt: PROTECTED_TOOLS.includes(call.name) || call.providerMetadata?.type === "computer",
 				});
 				continue;
 			}
@@ -178,6 +190,10 @@ export function collectSupercompactRegions(
 			}
 		}
 	}
+
+	// A call with no result cannot be removed: deleting the block would be fine,
+	// but the pair is the unit and there is no result to take with it. Provider
+	// serializers already strip a dangling call when it reaches context.
 
 	return regions;
 }
