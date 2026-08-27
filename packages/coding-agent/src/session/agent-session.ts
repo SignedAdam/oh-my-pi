@@ -4977,6 +4977,11 @@ export class AgentSession {
 		if (this.isCompacting || this.isGeneratingHandoff) {
 			throw new Error("Wait for the compaction in progress to finish or abort it before supercompacting.");
 		}
+		// A speculative summary is not covered by `isCompacting`, and it validates
+		// against entry ids and later boundaries. `fork()` preserves ids and this
+		// pass adds no boundary, so an armed summary would still look valid and
+		// could commit a description of history that is already gone.
+		this.#maintenance.cancelSpeculation();
 		// Copy first, so the original session keeps every byte and becomes the
 		// archive. A requested copy that does not happen aborts: `fork()` also
 		// returns false when an extension cancelled `session_before_switch`, and

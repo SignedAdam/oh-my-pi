@@ -735,13 +735,30 @@ export class SessionMaintenance {
 	#callIdsAnsweredOffBranch(branchEntries: SessionEntry[]): ReadonlySet<string> {
 		const all = this.#host.sessionManager.getEntries();
 		if (all.length === branchEntries.length) return new Set();
-		const onBranch = new Set(branchEntries.map(entry => entry.id));
+		const onBranch = new Map(branchEntries.map(entry => [entry.id, entry]));
+		const byId = new Map(all.map(entry => [entry.id, entry]));
 		const shared = new Set<string>();
 		for (const entry of all) {
 			if (entry.type !== "message" || onBranch.has(entry.id)) continue;
 			const message = entry.message;
 			if (message.role !== "toolResult") continue;
-			shared.add(message.toolCallId);
+			// Only a result whose own call entry is on the active branch is sharing
+			// that entry. Independent branches reuse ids freely, and exempting on
+			// the id alone would spare an unrelated pair here for no reason.
+			let ancestorId = entry.parentId;
+			while (ancestorId !== null) {
+				const ancestor = byId.get(ancestorId);
+				if (ancestor === undefined) break;
+				if (
+					ancestor.type === "message" &&
+					ancestor.message.role === "assistant" &&
+					ancestor.message.content.some(block => block.type === "toolCall" && block.id === message.toolCallId)
+				) {
+					if (onBranch.has(ancestor.id)) shared.add(message.toolCallId);
+					break;
+				}
+				ancestorId = ancestor.parentId;
+			}
 		}
 		return shared;
 	}

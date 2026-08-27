@@ -352,6 +352,24 @@ describe("automatic supercompact at the session layer", () => {
 		expect(stillCalls).toBe(true);
 	});
 
+	it("removes a pair whose id is reused on an unrelated branch", async () => {
+		const manager = persistedManager();
+		manager.appendMessage(userMessage("first"));
+		const rootId = manager.appendMessage(assistantWithCall("shared", model));
+		manager.appendMessage(toolResult("shared"));
+		manager.appendMessage(billedAssistant(model));
+		// An unrelated branch that happens to reuse the id, with its own call entry.
+		const otherCall = manager.appendMessageToBranch(assistantWithCall("shared", model), rootId);
+		manager.appendMessageToBranch(toolResult("shared"), otherCall);
+		maintenance = build(manager);
+
+		const outcome = await maintenance.supercompactContext({ archive: true });
+
+		// The off-branch result hangs off its own call, not the active one, so the
+		// active pair is still eligible.
+		expect(outcome.toolPairsRemoved).toBe(1);
+	});
+
 	it("keeps the recent rounds whole when configured to", async () => {
 		const manager = persistedManager();
 		seed(manager);
