@@ -1,12 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction/entries";
-import {
-	applySupercompactRegions,
-	collectSupercompactRegions,
-	type SupercompactRegion,
-} from "@oh-my-pi/pi-agent-core/compaction/supercompact";
-import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage, Usage, UserMessage } from "@oh-my-pi/pi-ai";
+import { applySupercompactRegions, collectSupercompactRegions } from "@oh-my-pi/pi-agent-core/compaction/supercompact";
+import type { AssistantMessage, TextContent, ToolResultMessage, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 
 const tokenizer = new Tokenizer();
 
@@ -54,137 +50,156 @@ function toolOutcome(toolCallId: string, toolName: string, text: string): Sessio
 	});
 }
 
-/** Attach the caller's own placeholder to each region, the way the session layer does. */
 function supercompact(entries: SessionMessageEntry[], keepRecentTurns = 0) {
 	const regions = collectSupercompactRegions(entries, tokenizer, keepRecentTurns);
-	const items = regions.map((region: SupercompactRegion) => ({
-		region,
-		replacement: region.kind === "toolResult" ? "[removed · recover: artifact://7]" : "",
-	}));
-	return { regions, tally: applySupercompactRegions(items) };
+	return { regions, tally: applySupercompactRegions(regions) };
 }
 
 describe("supercompact", () => {
-	it("keeps the dialogue verbatim and drops results, arguments, and reasoning", () => {
-		const fileBody = "export const answer = 42;\n".repeat(400);
+	it("deletes tool calls with their results and keeps the conversation verbatim", () => {
 		const question = "Why does the build fail on arm64 but pass on x86?";
-		const answer = "The native addon is only prebuilt for x86; arm64 falls through to the loader error.";
+		const answer = "The native addon is only prebuilt for x86.";
 		const entries = [
 			userTurn("u1", question),
 			assistantTurn("a1", [
-				{ type: "thinking", thinking: "Long private reasoning ".repeat(200) },
+				{ type: "thinking", thinking: "private reasoning ".repeat(200) },
 				{ type: "text", text: answer },
-				{ type: "toolCall", id: "c1", name: "write", arguments: { path: "src/answer.ts", content: fileBody } },
+				{
+					type: "toolCall",
+					id: "c1",
+					name: "write",
+					arguments: { path: "src/answer.ts", content: "x".repeat(9000) },
+				},
 			]),
-			toolOutcome("c1", "write", "Wrote 400 lines to src/answer.ts"),
+			toolOutcome("c1", "write", "Wrote 400 lines"),
 		];
 
 		const { tally } = supercompact(entries);
 
-		expect(tally.toolResults).toBe(1);
-		expect(tally.toolCalls).toBe(1);
-		expect(tally.thinkingBlocks).toBe(1);
+		expect(tally.toolPairs).toBe(1);
+		expect(tally.reasoningBlocks).toBe(1);
 
-		// Dialogue, both directions, untouched.
+		// Both sides of the conversation survive byte for byte.
 		expect((entries[0].message as UserMessage).content).toBe(question);
 		const assistant = entries[1].message as AssistantMessage;
-		const texts = assistant.content.filter((block): block is TextContent => block.type === "text");
-		expect(texts).toHaveLength(1);
-		expect(texts[0].text).toBe(answer);
+		expect(assistant.content).toHaveLength(1);
+		expect((assistant.content[0] as TextContent).text).toBe(answer);
 
-		// Reasoning gone, the tool call itself still present.
-		expect(assistant.content.some(block => block.type === "thinking")).toBe(false);
-		const call = assistant.content.find((block): block is ToolCall => block.type === "toolCall");
-		expect(call).toBeDefined();
-		expect(call?.id).toBe("c1");
-		expect(call?.name).toBe("write");
-		// Keys survive so the trace stays readable; the file body does not. A
-		// Nothing fabricated is added: arguments stay schema-shaped.
-		expect(Object.keys(call?.arguments ?? {})).toEqual(["path", "content"]);
-		expect(call?.arguments.path).toBe("src/answer.ts");
-		expect(String(call?.arguments.content)).toBe(`<elided ${fileBody.length} chars>`);
-
-		const result = entries[2].message as ToolResultMessage;
-		expect((result.content[0] as TextContent).text).toBe("[removed · recover: artifact://7]");
-		expect(result.prunedAt).toBeGreaterThan(0);
+		// The call is gone, not hollowed out, and its result is emptied with it.
+		expect(assistant.content.some(block => block.type === "toolCall")).toBe(false);
+		expect((entries[2].message as ToolResultMessage).content).toHaveLength(0);
 	});
 
-	it("drops the native replay payload and rawBlock so originals cannot come back", () => {
-		const secret = "x".repeat(5000);
+	it("never leaves a call without its result or a result without its call", () => {
 		const entries = [
 			assistantTurn("a1", [
-				{
-					type: "toolCall",
-					id: "c1",
-					name: "bash",
-					arguments: { command: secret },
-					rawBlock: `<bash>${secret}</bash>`,
-				},
+				{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.ts" } },
+				{ type: "toolCall", id: "c2", name: "read", arguments: { path: "b.ts" } },
 			]),
+			toolOutcome("c1", "read", "contents of a"),
+			toolOutcome("c2", "read", "contents of b"),
+		];
+
+		supercompact(entries);
+
+		const calls = (entries[0].message as AssistantMessage).content.filter(block => block.type === "toolCall");
+		expect(calls).toHaveLength(0);
+		expect((entries[1].message as ToolResultMessage).content).toHaveLength(0);
+		expect((entries[2].message as ToolResultMessage).content).toHaveLength(0);
+	});
+
+	it("archives the call and its result together so an in-place run can recover them", () => {
+		const secret = "supersecret-payload";
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: secret } }]),
+			toolOutcome("c1", "bash", "command output here"),
+		];
+
+		const { regions } = supercompact(entries);
+
+		expect(regions).toHaveLength(1);
+		expect(regions[0].originalText).toContain(secret);
+		expect(regions[0].originalText).toContain("command output here");
+	});
+
+	it("drops the native replay payload so originals cannot come back", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }]),
 		];
 		(entries[0].message as AssistantMessage).providerPayload = {
 			type: "openaiResponsesHistory",
-			items: [{ type: "function_call", arguments: secret }],
+			items: [{ type: "function_call", arguments: "ls" }],
 		};
 
 		supercompact(entries);
 
-		const assistant = entries[0].message as AssistantMessage;
-		const call = assistant.content[0] as ToolCall;
-		expect(call.rawBlock).toBeUndefined();
-		expect(assistant.providerPayload).toBeUndefined();
-		expect(JSON.stringify(call.arguments)).not.toContain(secret);
+		expect((entries[0].message as AssistantMessage).providerPayload).toBeUndefined();
 	});
 
-	it("holds the argument budget when no single value is oversized", () => {
-		// Per-value capping cannot bound these: 400 short keys and a long numeric
-		// array are already under the string budget.
-		const manyKeys: Record<string, unknown> = { coords: Array.from({ length: 500 }, (_, i) => i) };
-		for (let i = 0; i < 400; i++) manyKeys[`k${i}`] = i;
-		const entries = [assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "plot", arguments: manyKeys }])];
+	it("never removes skill calls, which are live instructions", () => {
+		const entries = [
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "skill", arguments: { name: "linear" } }]),
+			toolOutcome("c1", "skill", "Follow these steps"),
+		];
 
-		supercompact(entries);
+		const { tally } = supercompact(entries);
 
-		const call = (entries[0].message as AssistantMessage).content[0] as ToolCall;
-		expect(JSON.stringify(call.arguments).length).toBeLessThanOrEqual(800);
-		expect(Object.keys(call.arguments)).toContain("<elided>");
+		expect(tally.toolPairs).toBe(0);
+		expect((entries[1].message as ToolResultMessage).content).toHaveLength(1);
 	});
 
 	it("leaves the last N rounds whole when keepRecentTurns is set", () => {
 		const round = (n: number) => [
 			userTurn(`u${n}`, `round ${n}`),
 			assistantTurn(`a${n}`, [
-				{ type: "thinking", thinking: `reasoning ${n} `.repeat(50) },
-				{ type: "toolCall", id: `c${n}`, name: "read", arguments: { path: `f${n}.ts`, body: "x".repeat(4000) } },
+				{ type: "thinking", thinking: `reasoning ${n}` },
+				{ type: "toolCall", id: `c${n}`, name: "read", arguments: { path: `f${n}.ts` } },
 			]),
-			toolOutcome(`c${n}`, "read", `contents ${n} `.repeat(200)),
+			toolOutcome(`c${n}`, "read", `contents ${n}`),
 		];
 		const entries = [...round(1), ...round(2), ...round(3)];
 
 		const { tally } = supercompact(entries, 1);
 
-		// Rounds 1 and 2 reduced, round 3 untouched.
-		expect(tally.toolResults).toBe(2);
-		expect(tally.toolCalls).toBe(2);
-		expect(tally.thinkingBlocks).toBe(2);
+		expect(tally.toolPairs).toBe(2);
+		expect(tally.reasoningBlocks).toBe(2);
 
 		const lastAssistant = entries[7].message as AssistantMessage;
+		expect(lastAssistant.content.some(block => block.type === "toolCall")).toBe(true);
 		expect(lastAssistant.content.some(block => block.type === "thinking")).toBe(true);
-		const lastCall = lastAssistant.content.find((block): block is ToolCall => block.type === "toolCall");
-		expect(String(lastCall?.arguments.body)).toHaveLength(4000);
-		expect((entries[8].message as ToolResultMessage).prunedAt).toBeUndefined();
+		expect((entries[8].message as ToolResultMessage).content).toHaveLength(1);
 	});
 
-	it("removes nothing when keepRecentTurns covers every round", () => {
+	it("does not treat a trailing reminder as the start of the kept round", () => {
 		const entries = [
-			userTurn("u1", "only round"),
-			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.ts" } }]),
-			toolOutcome("c1", "read", "contents ".repeat(200)),
+			userTurn("u1", "old round"),
+			assistantTurn("a1", [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "old.ts" } }]),
+			toolOutcome("c1", "read", "old contents"),
+			userTurn("u2", "the round I want kept"),
+			assistantTurn("a2", [{ type: "toolCall", id: "c2", name: "read", arguments: { path: "new.ts" } }]),
+			toolOutcome("c2", "read", "new contents"),
+			// A reminder is injected as a custom_message, not a real turn. Counting it
+			// as a turn start would push the window past the round the setting kept.
+			{
+				type: "custom_message",
+				id: "r1",
+				parentId: null,
+				timestamp: "2026-08-26T00:00:00.000Z",
+				customType: "system-reminder",
+				content: "be brief",
+			} as unknown as SessionMessageEntry,
 		];
 
-		const { tally } = supercompact(entries, 5);
+		const { tally } = supercompact(entries, 1);
 
-		expect(tally.toolResults).toBe(0);
-		expect((entries[2].message as ToolResultMessage).prunedAt).toBeUndefined();
+		expect(tally.toolPairs).toBe(1);
+		const keptAssistant = entries[4].message as AssistantMessage;
+		expect(keptAssistant.content.some(block => block.type === "toolCall")).toBe(true);
+	});
+
+	it("finds nothing to remove in a session that is already only conversation", () => {
+		const entries = [userTurn("u1", "what is the plan?"), assistantTurn("a1", [{ type: "text", text: "Ship it." }])];
+
+		expect(collectSupercompactRegions(entries, tokenizer, 0)).toHaveLength(0);
 	});
 });

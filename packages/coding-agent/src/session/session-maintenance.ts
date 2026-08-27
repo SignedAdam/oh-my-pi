@@ -708,70 +708,55 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Supercompact the branch ("supercompact").
+	 * Reduce the branch to its conversation.
 	 *
-	 * Drops every tool result, caps every tool-call argument, and removes every
-	 * reasoning block across the whole branch, keeping the conversation itself
-	 * verbatim from the first turn. There is no threshold, no recency window, no
-	 * compaction boundary, and no summarization model: the input is the entire
-	 * history and the output is deterministic.
+	 * Deletes every tool call with its result and every reasoning block across
+	 * the whole branch, keeping user and assistant messages verbatim from the
+	 * first turn. No threshold, no recency window, no summarization model: the
+	 * input is the entire history and the output is deterministic.
+	 *
+	 * `archive` writes everything removed to a session artifact first. The caller
+	 * sets it for an in-place run, where the rewritten session is the only copy.
+	 * A copied run needs no archive: the original session file is the archive.
 	 *
 	 * Same rewrite contract as {@link dropImages}: mutate in place, persist via
-	 * `rewriteEntries`, replay the rebuilt context through the agent, and tear
-	 * down provider sessions that cache message identity.
-	 *
-	 * No-op (zero counts) when the branch holds nothing but conversation.
+	 * `rewriteEntries`, replay the rebuilt context, and tear down provider
+	 * sessions that cache message identity.
 	 */
-	async supercompactContext(opts: { signal?: AbortSignal } = {}): Promise<SupercompactOutcome> {
-		const keepRecentTurns = Math.max(0, this.#host.settings.getGroup("compaction").supercompactKeepRecentTurns);
+	async supercompactContext(
+		opts: { keepRecentTurns?: number; archive?: boolean; signal?: AbortSignal } = {},
+	): Promise<SupercompactOutcome> {
+		const configured = this.#host.settings.getGroup("compaction").supercompactKeepRecentTurns;
+		const keepRecentTurns = Math.max(0, opts.keepRecentTurns ?? configured);
 		const tokensBefore = this.#measureLiveContextTokens();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const regions = collectSupercompactRegions(branchEntries, this.#tokenizer, keepRecentTurns);
 		const unchanged: SupercompactOutcome = {
-			toolResultsRemoved: 0,
-			toolCallsTrimmed: 0,
-			thinkingBlocksDropped: 0,
+			toolPairsRemoved: 0,
+			reasoningBlocksRemoved: 0,
 			tokensBefore,
 			tokensAfter: tokensBefore,
 		};
 		if (regions.length === 0) return unchanged;
 
-		// Recovery is a precondition, not a courtesy: without a readable archive
-		// this operation is a permanent delete. The gate is the artifact directory,
-		// not the session file, because a subagent can adopt its parent's artifact
-		// manager and read back through `artifact://` while having no session file
-		// of its own. Sessions with neither keep only an unreadable in-memory copy.
-		if (this.#host.sessionManager.getArtifactsDir() === null) {
-			throw new Error(
-				"Supercompact needs somewhere to save a recovery artifact before it removes anything, and this session has none.",
-			);
+		let artifactId: string | undefined;
+		if (opts.archive === true) {
+			// An in-place run rewrites the only copy, so the archive is a
+			// precondition rather than a courtesy.
+			artifactId = await this.#saveSupercompactArtifact(regions);
+			if (artifactId === undefined) {
+				throw new Error(
+					"Could not save the archive, so nothing was changed. Rewriting this session in place needs somewhere to store what it removes.",
+				);
+			}
 		}
-		const artifactId = await this.#saveSupercompactArtifact(regions);
-		if (artifactId === undefined) {
-			throw new Error(
-				"Could not save the recovery artifact, so nothing was changed. Supercompact needs a persisted session to write it to.",
-			);
-		}
-		// Last cancellation point. Everything below mutates and persists, so a
-		// later abort would report a cancel that did not happen.
+		// Last cancellation point: everything below mutates and persists.
 		if (opts.signal?.aborted === true) return unchanged;
-		const items = regions.map((region, index) => ({
-			region,
-			// Only tool-result regions consume a replacement string. Argument and
-			// reasoning regions are rewritten structurally: a fabricated key inside
-			// schema-governed arguments can fail strict validation and teaches the
-			// model to emit it, so the recovery id stays in the operator summary.
-			replacement:
-				region.kind === "toolResult"
-					? `[removed ~${region.tokens} tokens · recover: artifact://${artifactId} (region ${index + 1})]`
-					: "",
-		}));
 
 		// Tokens removed from a prompt the provider already billed have to come off
-		// the displayed budget or it stays pinned to pre-pass counts. Measured
-		// rather than estimated: regions are mutated in place, so counting the same
-		// entries before and after is exact. A per-region estimate cannot be,
-		// because trimmed arguments and retained images both survive in context.
+		// the displayed budget or it stays pinned to pre-pass counts. Measured, not
+		// estimated: regions mutate in place, so counting the same entries before
+		// and after is exact.
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
@@ -782,10 +767,9 @@ export class SessionMaintenance {
 			anchorIndex = index;
 			break;
 		}
-		// Start where the prompt actually starts. Entries before the newest reset
-		// boundary, or before a compaction's kept range, are not in the billed
-		// prompt at all, so removing them corrects nothing and counting them would
-		// subtract tokens the provider never charged for.
+		// Start where the prompt starts. Entries before the newest reset boundary,
+		// or before a compaction's kept range, are not in the billed prompt, so
+		// counting them would subtract tokens the provider never charged for.
 		let contextStart = 0;
 		for (let index = branchEntries.length - 1; index >= 0; index--) {
 			if (branchEntries[index].type !== "reset_boundary") continue;
@@ -800,15 +784,13 @@ export class SessionMaintenance {
 		for (let index = contextStart; index < anchorIndex; index++) {
 			const entry = branchEntries[index];
 			if (entry.type !== "message") continue;
-			// Remote replacement history already omits everything up to the
-			// compaction, so removing it costs the provider prompt nothing.
 			if (hasRemoteReplacementHistory && index <= compactionIndex) continue;
 			anchoredEntries.push(entry);
 		}
 		let anchoredBefore = 0;
 		for (const entry of anchoredEntries) anchoredBefore += this.#tokenizer.countMessage(entry.message);
 
-		const tally = applySupercompactRegions(items);
+		const tally = applySupercompactRegions(regions);
 
 		let anchoredAfter = 0;
 		for (const entry of anchoredEntries) anchoredAfter += this.#tokenizer.countMessage(entry.message);
@@ -822,9 +804,8 @@ export class SessionMaintenance {
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
 		return {
-			toolResultsRemoved: tally.toolResults,
-			toolCallsTrimmed: tally.toolCalls,
-			thinkingBlocksDropped: tally.thinkingBlocks,
+			toolPairsRemoved: tally.toolPairs,
+			reasoningBlocksRemoved: tally.reasoningBlocks,
 			tokensBefore,
 			tokensAfter: this.#measureLiveContextTokens(sessionContext.messages),
 			artifactId,
@@ -4208,9 +4189,9 @@ export class SessionMaintenance {
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			return { dropped: result.toolResultsDropped + result.blocksDropped, tokensFreed: result.tokensFreed };
 		}
-		const result = await this.supercompactContext({ signal });
+		const result = await this.supercompactContext({ archive: true, signal });
 		return {
-			dropped: result.toolResultsRemoved + result.toolCallsTrimmed + result.thinkingBlocksDropped,
+			dropped: result.toolPairsRemoved + result.reasoningBlocksRemoved,
 			tokensFreed: Math.max(0, result.tokensBefore - result.tokensAfter),
 		};
 	}

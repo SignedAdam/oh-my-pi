@@ -349,7 +349,7 @@ import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-sta
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
-import type { SupercompactResult } from "./supercompact-types";
+import type { SupercompactOptions, SupercompactResult } from "./supercompact-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -4927,18 +4927,26 @@ export class AgentSession {
 	 * Rejected while streaming: it rewrites the history the live turn is
 	 * reading from.
 	 */
-	async supercompact(opts: { inPlace?: boolean } = {}): Promise<SupercompactResult> {
+	async supercompact(opts: SupercompactOptions = {}): Promise<SupercompactResult> {
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish or abort it before supercompacting.");
 		}
-		const forked = opts.inPlace === true ? false : await this.fork();
-		if (opts.inPlace !== true && !forked) {
+		// Copy first, so the original session keeps every byte and becomes the
+		// archive. A requested copy that does not happen aborts: `fork()` also
+		// returns false when an extension cancelled `session_before_switch`, and
+		// answering that by rewriting the session is the opposite of what was
+		// asked. `inPlace` rewrites deliberately and archives instead.
+		const copied = opts.inPlace === true ? false : await this.fork();
+		if (opts.inPlace !== true && !copied) {
 			throw new Error(
-				"Could not fork this session, so nothing was changed. Use `/supercompact here` to reduce this session without forking.",
+				"Could not copy this session, so nothing was changed. Use `/supercompact here` to rewrite it in place instead.",
 			);
 		}
-		const outcome = await this.#maintenance.supercompactContext();
-		return { ...outcome, forked, sessionFile: this.sessionFile };
+		const outcome = await this.#maintenance.supercompactContext({
+			keepRecentTurns: opts.keepRecentTurns,
+			archive: !copied,
+		});
+		return { ...outcome, copied, sessionFile: this.sessionFile };
 	}
 
 	/** Compact the active session history. */

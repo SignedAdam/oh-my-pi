@@ -115,6 +115,7 @@ import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
+import type { SupercompactOptions } from "../session/supercompact-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
@@ -5396,8 +5397,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleShakeCommand(mode);
 	}
 
-	handleSupercompactCommand(inPlace: boolean): Promise<void> {
-		return this.#commandController.handleSupercompactCommand(inPlace);
+	handleSupercompactCommand(opts: SupercompactOptions): Promise<void> {
+		return this.#commandController.handleSupercompactCommand(opts);
 	}
 
 	executeCompaction(

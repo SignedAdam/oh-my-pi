@@ -10,7 +10,11 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import { formatSupercompactSummary, type SupercompactResult } from "../session/supercompact-types";
+import {
+	formatSupercompactSummary,
+	type SupercompactOptions,
+	type SupercompactResult,
+} from "../session/supercompact-types";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -43,6 +47,33 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	if (verb === "images") return "images";
 	if (verb === "thinking") return "thinking";
 	return { error: `Unknown /shake mode "${verb}". Use elide, images, or thinking.` };
+}
+
+/**
+ * Parse `/supercompact [here] [keep N] [images]` in any order.
+ *
+ * Each flag overrides its setting for this run only, so a one-off pass never
+ * means editing configuration first.
+ */
+function parseSupercompactArgs(args: string): SupercompactOptions | { error: string } {
+	const options: SupercompactOptions = {};
+	const words = args.trim().split(/\s+/).filter(Boolean);
+	for (let index = 0; index < words.length; index++) {
+		const word = words[index].toLowerCase();
+		if (word === "here") {
+			options.inPlace = true;
+		} else if (word === "keep") {
+			const count = Number(words[index + 1]);
+			if (!Number.isInteger(count) || count < 0) {
+				return { error: "Usage: /supercompact keep <rounds>, for example `keep 3`." };
+			}
+			options.keepRecentTurns = count;
+			index++;
+		} else {
+			return { error: `Unknown /supercompact argument "${words[index]}". Use here or keep <n>.` };
+		}
+	}
+	return options;
 }
 
 /** Format the session's workspace directories (cwd + additional) for display. */
@@ -226,19 +257,20 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "supercompact",
 		icon: "vibrate",
-		description: "Keep the conversation, remove every tool result, call argument, and thinking block",
-		acpDescription: "Fork the session and reduce it to the conversation alone",
-		subcommands: [{ name: "here", description: "Reduce the current session instead of a fork" }],
-		acpInputHint: "[here]",
+		description: "Delete every tool call and result from the whole session, keeping the conversation",
+		acpDescription: "Copy the session and reduce the copy to the conversation alone",
+		subcommands: [
+			{ name: "here", description: "Rewrite this session instead of copying it" },
+			{ name: "keep", description: "Leave the last N rounds untouched, e.g. keep 3" },
+		],
+		acpInputHint: "[here] [keep N]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const verb = command.args.trim().toLowerCase();
-			if (verb !== "" && verb !== "here") {
-				return usage(`Unknown /supercompact mode "${verb}". Use "here" or no argument.`, runtime);
-			}
+			const parsed = parseSupercompactArgs(command.args);
+			if ("error" in parsed) return usage(parsed.error, runtime);
 			let result: SupercompactResult;
 			try {
-				result = await runtime.session.supercompact({ inPlace: verb === "here" });
+				result = await runtime.session.supercompact(parsed);
 			} catch (err) {
 				return usage(errorMessage(err), runtime);
 			}
@@ -247,12 +279,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			const verb = command.args.trim().toLowerCase();
-			if (verb !== "" && verb !== "here") {
-				runtime.ctx.showWarning(`Unknown /supercompact mode "${verb}". Use "here" or no argument.`);
+			const parsed = parseSupercompactArgs(command.args);
+			if ("error" in parsed) {
+				runtime.ctx.showWarning(parsed.error);
 				return;
 			}
-			await runtime.ctx.handleSupercompactCommand(verb === "here");
+			await runtime.ctx.handleSupercompactCommand(parsed);
 		},
 	},
 	{
